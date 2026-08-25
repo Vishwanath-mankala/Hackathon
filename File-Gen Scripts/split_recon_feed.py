@@ -72,11 +72,33 @@ def sniff_delimiter(path, sample_size=8192):
         return ","  # sensible fallback
 
 
+def clean_cell(v):
+    """
+    Some source exports (mainframe/legacy systems in particular) store
+    values with literal quote characters and fixed-width space padding
+    baked into the data itself, e.g. a cell whose real content is:
+        ' "286051609972"   '
+    (leading space, literal quote marks, trailing padding) rather than
+    just '286051609972'. Left alone, this re-quotes and doubles quotes
+    every time the value is written back out to CSV, producing the
+    "" ""123"" "" mess. Strip it once, at the source, before anything
+    else touches the data.
+    """
+    if v is None:
+        return ""
+    v = str(v).strip()
+    # Repeatedly peel matching outer quote characters + padding.
+    while len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        v = v[1:-1].strip()
+    return v
+
+
 def load_source(path):
     delim = sniff_delimiter(path)
     print(f"Detected delimiter: {repr(delim)}")
     df = pd.read_csv(path, sep=delim, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
+    df = df.map(clean_cell) if hasattr(df, "map") else df.applymap(clean_cell)
     missing = [c for c in ["A_id", "B_id"] if c not in df.columns]
     if missing:
         print(f"ERROR: expected columns {missing} not found. Actual columns:\n{list(df.columns)}")
