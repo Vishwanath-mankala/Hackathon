@@ -1,0 +1,1 @@
+Full pipeline include FE, BE, SMTP & Agentic Integrations repo.
