@@ -97,6 +97,32 @@ def reference_overlap(cache_row, ingest_row):
     return any(t in fields_cache for t in tokens_ingest)
 
 
+def reference_similarity_score(cache_row, ingest_row):
+    """
+    Numeric version of reference_overlap, used to break ties between
+    multiple equally-valid candidates (e.g. several cache rows with the
+    identical account+amount+date -- a recurring/standing-instruction
+    amount). Counts how many distinct meaningful tokens (len >= 5, to
+    skip currency codes/short noise) from the ingestion reference and
+    narrative also appear in the cache candidate's reference, narrative,
+    or allocation fields. Higher score = more likely the true match.
+    Returns 0 when there's nothing useful to compare (e.g. either side's
+    text fields are empty) -- ties then fall through to date/amount
+    closeness exactly as before.
+    """
+    fields_cache = " ".join([
+        str(cache_row.get("reference", "")), str(cache_row.get("narrative", "")),
+        str(cache_row.get("allocation", "")),
+    ]).lower()
+    fields_ingest = " ".join([
+        str(ingest_row.get("reference", "")), str(ingest_row.get("narrative", "")),
+    ]).lower()
+    if not fields_cache.strip() or not fields_ingest.strip():
+        return 0
+    tokens_ingest = {t for t in fields_ingest.replace("/", " ").split() if len(t) >= 5}
+    return sum(1 for t in tokens_ingest if t in fields_cache)
+
+
 # ---------------------------------------------------------------------------
 # Rule tiers -- each returns True/False given a prepared (cache_row, ingest_row)
 # with pre-parsed 'amount_abs' and 'date_parsed' fields already attached.
@@ -199,17 +225,27 @@ class RuleEngine:
             if not candidates:
                 continue
             if len(candidates) > 1:
-                # Tie-break: closest date, then smallest amount diff.
+                # Tie-break priority: 1) reference/narrative text overlap
+                # (highest similarity wins -- this is the actual evidence
+                # that distinguishes two otherwise-identical candidates,
+                # e.g. two standing-instruction payments of the same
+                # amount on the same day), 2) closest date, 3) smallest
+                # amount diff, as a last resort when there's no text signal
+                # at all.
                 candidates.sort(key=lambda c: (
+                    -reference_similarity_score(c, ingest_row),
                     abs((c["date_parsed"] - ingest_row["date_parsed"]).days)
                     if c["date_parsed"] and ingest_row["date_parsed"] else 999,
                     abs((c["amount_abs"] or 0) - (ingest_row["amount_abs"] or 0)),
                 ))
+                top_score = reference_similarity_score(candidates[0], ingest_row)
                 self.ambiguous.append({
                     "tier": tier_name,
                     "ingest_external_txn_id": ingest_row.get("external_txn_id"),
                     "candidate_internal_txn_ids": [c.get("internal_txn_id") for c in candidates],
                     "chosen_internal_txn_id": candidates[0].get("internal_txn_id"),
+                    "chosen_by_reference_score": top_score,
+                    "disambiguated_by_reference": top_score > 0,
                     "batch_file": batch_file,
                 })
             chosen = candidates[0]
