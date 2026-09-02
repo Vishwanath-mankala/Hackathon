@@ -131,6 +131,12 @@ def build_ingest(df):
     return ingest_df
 
 
+def _control_total(chunk):
+    """Sum of amounts, as a real file's trailer record would declare it."""
+    amounts = pd.to_numeric(chunk["amount"], errors="coerce")
+    return round(float(amounts.sum()), 2)
+
+
 def write_batches_by_size(ingest_df, out_dir, batch_size):
     manifest = []
     n = len(ingest_df)
@@ -143,6 +149,8 @@ def write_batches_by_size(ingest_df, out_dir, batch_size):
             "sequence": i + 1,
             "file": fname,
             "row_count": len(chunk),
+            "declared_record_count": len(chunk),
+            "declared_control_total": _control_total(chunk),
             "min_booking_date": chunk["booking_date"].min(),
             "max_booking_date": chunk["booking_date"].max(),
         })
@@ -162,6 +170,8 @@ def write_batches_by_date(ingest_df, out_dir):
             "sequence": seq,
             "file": fname,
             "row_count": len(chunk),
+            "declared_record_count": len(chunk),
+            "declared_control_total": _control_total(chunk),
             "min_booking_date": chunk["booking_date"].min(),
             "max_booking_date": chunk["booking_date"].max(),
         })
@@ -172,7 +182,7 @@ def write_batches_by_date(ingest_df, out_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="Path to the raw 60k+ row recon CSV")
-    ap.add_argument("--out-dir", default="./OutPut", help="Output directory")
+    ap.add_argument("--out-dir", default="/mnt/user-data/outputs", help="Output directory")
     ap.add_argument("--split-by", choices=["size", "date"], default="size",
                      help="'size' = fixed-row batches, 'date' = one file per booking_date")
     ap.add_argument("--batch-size", type=int, default=500,
