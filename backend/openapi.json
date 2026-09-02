@@ -1,0 +1,1673 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Reconciliation & Feed Processing API",
+    "description": "Production-ready FastAPI REST API backend wrapping feed generation, structural gating, tiered rule engine reconciliation, and diagnostics.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/feed/split": {
+      "post": {
+        "tags": [
+          "Feed Ingestion & Batching"
+        ],
+        "summary": "Split Recon Source File",
+        "description": "Splits a raw recon export into internal cache (cache_gl_cashbook.csv) and sequential ingestion batches with a declared manifest. Accepts either a file upload or a server-local file path.",
+        "operationId": "split_feed_api_feed_split_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_split_feed_api_feed_split_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitReconResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/feed/manifest": {
+      "get": {
+        "tags": [
+          "Feed Ingestion & Batching"
+        ],
+        "summary": "Get Ingestion Manifest",
+        "description": "Reads and parses manifest.csv detailing sequence, row counts, and control totals for all batches.",
+        "operationId": "get_manifest_api_feed_manifest_get",
+        "parameters": [
+          {
+            "name": "manifest_path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional custom manifest path",
+              "title": "Manifest Path"
+            },
+            "description": "Optional custom manifest path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManifestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/feed/batches": {
+      "get": {
+        "tags": [
+          "Feed Ingestion & Batching"
+        ],
+        "summary": "List Ingestion Batches",
+        "description": "Lists all batch CSV files currently generated and ready for ingestion processing.",
+        "operationId": "list_batches_api_feed_batches_get",
+        "parameters": [
+          {
+            "name": "batches_dir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional custom batches directory",
+              "title": "Batches Dir"
+            },
+            "description": "Optional custom batches directory"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchesListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gate/check-batch": {
+      "post": {
+        "tags": [
+          "Structural Gate Validation"
+        ],
+        "summary": "Validate Single Batch File",
+        "description": "Applies 4 deterministic checks to a batch file: encoding, required header columns, record count vs declared count, and control total sum vs declared total.",
+        "operationId": "check_batch_api_gate_check_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateResultSchema"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gate/check-all": {
+      "post": {
+        "tags": [
+          "Structural Gate Validation"
+        ],
+        "summary": "Validate All Manifest Batches",
+        "description": "Executes structural gate checks on all batches registered in the manifest. Corrupt or inconsistent batches are automatically quarantined before reaching the rule engine.",
+        "operationId": "check_all_batches_api_gate_check_all_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateAllRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/run": {
+      "post": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Run Reconciliation Engine",
+        "description": "Runs the tiered waterfall rule engine against the cache and sequential ingestion batches. Validates structural integrity, applies tiers (Exact, Date Tolerance, Reference Match, Amount Tolerance), and produces matched, remaining cache, unmatched exceptions, and ambiguous reviews.",
+        "operationId": "run_reconciliation_api_recon_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/matches": {
+      "get": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Query Matched Transactions",
+        "description": "Returns paginated matched transactions with optional account and tier filtering.",
+        "operationId": "get_matches_api_recon_matches_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 50,
+              "title": "Page Size"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by account number/substring",
+              "title": "Account"
+            },
+            "description": "Filter by account number/substring"
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by match tier (e.g. TIER_1_EXACT)",
+              "title": "Tier"
+            },
+            "description": "Filter by match tier (e.g. TIER_1_EXACT)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedQueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/unmatched-cache": {
+      "get": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Query Remaining Unmatched Cache",
+        "description": "Returns paginated internal cashbook/GL rows that were never matched by ingestion files.",
+        "operationId": "get_unmatched_cache_api_recon_unmatched_cache_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedQueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/unmatched-ingest": {
+      "get": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Query Unmatched Ingestion Exceptions",
+        "description": "Returns paginated bank statement transactions that could not find a match in the internal cache.",
+        "operationId": "get_unmatched_ingest_api_recon_unmatched_ingest_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedQueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/ambiguous": {
+      "get": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Query Ambiguous Multi-Candidate Matches",
+        "description": "Returns paginated records where multiple candidates competed, detailing tie-breaker scores and decisions.",
+        "operationId": "get_ambiguous_matches_api_recon_ambiguous_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedQueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recon/download/{filename}": {
+      "get": {
+        "tags": [
+          "Reconciliation Engine"
+        ],
+        "summary": "Download Result CSV",
+        "description": "Download any reconciliation output or manifest CSV file directly.",
+        "operationId": "download_csv_api_recon_download__filename__get",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Filename"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/diagnostics/ambiguity": {
+      "post": {
+        "tags": [
+          "Diagnostics & Simulation"
+        ],
+        "summary": "Diagnose Match Ambiguity",
+        "description": "Analyzes ambiguous matches from the latest reconciliation run. Identifies concentration of recurring amounts/accounts, assesses tie-breaker efficiency, and generates a diagnostic report.",
+        "operationId": "diagnose_ambiguity_api_diagnostics_ambiguity_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmbiguityDiagnosisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmbiguityDiagnosisResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/diagnostics/corrupt-batch": {
+      "post": {
+        "tags": [
+          "Diagnostics & Simulation"
+        ],
+        "summary": "Simulate Batch Corruption (Chaos Testing)",
+        "description": "Injects a realistic real-world failure into a batch file to test structural gate enforcement. Modes include: truncate, dropped_row, duplicate_row, tampered_amount, missing_column, bad_encoding. Automatically creates a .bak backup.",
+        "operationId": "corrupt_batch_api_diagnostics_corrupt_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorruptBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorruptBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/diagnostics/restore-batch": {
+      "post": {
+        "tags": [
+          "Diagnostics & Simulation"
+        ],
+        "summary": "Restore Corrupted Batch",
+        "description": "Restores a previously corrupted batch file back from its .bak backup copy.",
+        "operationId": "restore_batch_api_diagnostics_restore_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health Check",
+        "description": "System liveness and readiness health probe.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Root",
+        "description": "Root redirect / discovery metadata.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AmbiguityDiagnosisRequest": {
+        "properties": {
+          "results_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Results Dir",
+            "description": "Path to recon_results directory containing ambiguous_matches_for_review.csv. Defaults to config."
+          }
+        },
+        "type": "object",
+        "title": "AmbiguityDiagnosisRequest"
+      },
+      "AmbiguityDiagnosisResponse": {
+        "properties": {
+          "total_ambiguous": {
+            "type": "integer",
+            "title": "Total Ambiguous"
+          },
+          "avg_candidates": {
+            "type": "number",
+            "title": "Avg Candidates"
+          },
+          "max_candidates": {
+            "type": "integer",
+            "title": "Max Candidates"
+          },
+          "ambiguity_by_tier": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Ambiguity By Tier"
+          },
+          "resolved_by_reference": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By Reference"
+          },
+          "resolved_by_reference_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By Reference Pct"
+          },
+          "top_accounts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Top Accounts"
+          },
+          "top_amounts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Top Amounts"
+          },
+          "top_amounts_concentration_pct": {
+            "type": "number",
+            "title": "Top Amounts Concentration Pct"
+          },
+          "is_concentrated": {
+            "type": "boolean",
+            "title": "Is Concentrated"
+          },
+          "diagnostic_assessment": {
+            "type": "string",
+            "title": "Diagnostic Assessment"
+          },
+          "output_detail_csv": {
+            "type": "string",
+            "title": "Output Detail Csv"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_ambiguous",
+          "avg_candidates",
+          "max_candidates",
+          "ambiguity_by_tier",
+          "top_accounts",
+          "top_amounts",
+          "top_amounts_concentration_pct",
+          "is_concentrated",
+          "diagnostic_assessment",
+          "output_detail_csv"
+        ],
+        "title": "AmbiguityDiagnosisResponse"
+      },
+      "BatchesListResponse": {
+        "properties": {
+          "batches_dir": {
+            "type": "string",
+            "title": "Batches Dir"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batches_dir",
+          "count",
+          "files"
+        ],
+        "title": "BatchesListResponse"
+      },
+      "Body_split_feed_api_feed_split_post": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File",
+            "description": "Recon CSV file upload"
+          },
+          "input_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Path",
+            "description": "Path to local file on server. Used if no file is uploaded. Defaults to project sample dataset if both omitted."
+          },
+          "split_by": {
+            "type": "string",
+            "enum": [
+              "size",
+              "date"
+            ],
+            "title": "Split By",
+            "description": "'size' or 'date'",
+            "default": "size"
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Batch Size",
+            "description": "Rows per batch if split_by='size'",
+            "default": 500
+          },
+          "out_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Out Dir",
+            "description": "Custom output directory"
+          }
+        },
+        "type": "object",
+        "title": "Body_split_feed_api_feed_split_post"
+      },
+      "CheckDetail": {
+        "properties": {
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "passed",
+          "detail"
+        ],
+        "title": "CheckDetail"
+      },
+      "CorruptBatchRequest": {
+        "properties": {
+          "batch_filename": {
+            "type": "string",
+            "title": "Batch Filename",
+            "description": "Batch CSV filename in ingestion_batches (e.g. ingest_batch_0001.csv)"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "truncate",
+              "dropped_row",
+              "duplicate_row",
+              "tampered_amount",
+              "missing_column",
+              "bad_encoding"
+            ],
+            "title": "Mode",
+            "description": "Type of corruption to simulate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_filename",
+          "mode"
+        ],
+        "title": "CorruptBatchRequest"
+      },
+      "CorruptBatchResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "file": {
+            "type": "string",
+            "title": "File"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "backup_path": {
+            "type": "string",
+            "title": "Backup Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "file",
+          "mode",
+          "backup_path"
+        ],
+        "title": "CorruptBatchResponse"
+      },
+      "GateAllRequest": {
+        "properties": {
+          "batches_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batches Dir",
+            "description": "Custom batches directory. Defaults to configured batches_dir."
+          },
+          "manifest_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Path",
+            "description": "Custom manifest CSV path."
+          },
+          "quarantine_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quarantine Dir",
+            "description": "Directory to copy failing batches to."
+          }
+        },
+        "type": "object",
+        "title": "GateAllRequest"
+      },
+      "GateCheckRequest": {
+        "properties": {
+          "batch_filename": {
+            "type": "string",
+            "title": "Batch Filename",
+            "description": "Filename in ingestion_batches directory (e.g. ingest_batch_0001.csv)"
+          },
+          "declared_record_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Record Count",
+            "description": "Optional expected record count. If omitted, looked up from manifest.csv"
+          },
+          "declared_control_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Control Total",
+            "description": "Optional expected control total amount. If omitted, looked up from manifest.csv"
+          },
+          "expected_encoding": {
+            "type": "string",
+            "title": "Expected Encoding",
+            "description": "Expected file encoding",
+            "default": "utf-8"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_filename"
+        ],
+        "title": "GateCheckRequest"
+      },
+      "GateResultSchema": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "title": "File",
+            "description": "Batch filename"
+          },
+          "passed": {
+            "type": "boolean",
+            "title": "Passed",
+            "description": "True if batch passed all structural checks"
+          },
+          "checks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CheckDetail"
+            },
+            "type": "object",
+            "title": "Checks",
+            "description": "Individual check results: encoding, required_sections, record_count, control_total"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons",
+            "description": "Human-readable failure reasons"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "passed"
+        ],
+        "title": "GateResultSchema"
+      },
+      "GateSummaryResponse": {
+        "properties": {
+          "total_batches": {
+            "type": "integer",
+            "title": "Total Batches"
+          },
+          "passed_count": {
+            "type": "integer",
+            "title": "Passed Count"
+          },
+          "failed_count": {
+            "type": "integer",
+            "title": "Failed Count"
+          },
+          "quarantined_count": {
+            "type": "integer",
+            "title": "Quarantined Count"
+          },
+          "quarantine_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quarantine Dir"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/GateResultSchema"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_batches",
+          "passed_count",
+          "failed_count",
+          "quarantined_count",
+          "quarantine_dir",
+          "results"
+        ],
+        "title": "GateSummaryResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ManifestRecord": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "title": "Sequence",
+            "description": "Batch execution sequence order"
+          },
+          "file": {
+            "type": "string",
+            "title": "File",
+            "description": "Batch CSV filename"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count",
+            "description": "Actual row count in batch"
+          },
+          "declared_record_count": {
+            "type": "integer",
+            "title": "Declared Record Count",
+            "description": "Declared record count for structural validation"
+          },
+          "declared_control_total": {
+            "type": "number",
+            "title": "Declared Control Total",
+            "description": "Declared control total amount"
+          },
+          "min_booking_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Booking Date",
+            "description": "Earliest booking date in batch"
+          },
+          "max_booking_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Booking Date",
+            "description": "Latest booking date in batch"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sequence",
+          "file",
+          "row_count",
+          "declared_record_count",
+          "declared_control_total"
+        ],
+        "title": "ManifestRecord"
+      },
+      "ManifestResponse": {
+        "properties": {
+          "manifest_path": {
+            "type": "string",
+            "title": "Manifest Path"
+          },
+          "total_batches": {
+            "type": "integer",
+            "title": "Total Batches"
+          },
+          "total_declared_records": {
+            "type": "integer",
+            "title": "Total Declared Records"
+          },
+          "total_declared_amount": {
+            "type": "number",
+            "title": "Total Declared Amount"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestRecord"
+            },
+            "type": "array",
+            "title": "Records"
+          }
+        },
+        "type": "object",
+        "required": [
+          "manifest_path",
+          "total_batches",
+          "total_declared_records",
+          "total_declared_amount",
+          "records"
+        ],
+        "title": "ManifestResponse"
+      },
+      "MatchConfigSchema": {
+        "properties": {
+          "date_tolerance_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Date Tolerance Days",
+            "description": "Tier 2 date window fallback in days",
+            "default": 3
+          },
+          "amount_abs_tolerance": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Amount Abs Tolerance",
+            "description": "Tier 4 absolute currency slack",
+            "default": 1.0
+          },
+          "amount_pct_tolerance": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Amount Pct Tolerance",
+            "description": "Tier 4 percentage slack on top of absolute",
+            "default": 0.0
+          },
+          "direction_mode": {
+            "type": "string",
+            "enum": [
+              "ignore",
+              "same",
+              "opposite"
+            ],
+            "title": "Direction Mode",
+            "description": "'ignore' = sign convention unknown, 'same' = DR matches DR, 'opposite' = DR matches CR",
+            "default": "ignore"
+          }
+        },
+        "type": "object",
+        "title": "MatchConfigSchema"
+      },
+      "PaginatedQueryResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "total_pages": {
+            "type": "integer",
+            "title": "Total Pages"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size",
+          "total_pages",
+          "items"
+        ],
+        "title": "PaginatedQueryResponse"
+      },
+      "ReconRunRequest": {
+        "properties": {
+          "cache_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Path",
+            "description": "Path to cache_gl_cashbook.csv. Defaults to config."
+          },
+          "manifest_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Path",
+            "description": "Path to manifest.csv. Defaults to config."
+          },
+          "batches_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batches Dir",
+            "description": "Directory containing batch CSVs. Defaults to config."
+          },
+          "out_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Out Dir",
+            "description": "Output directory for recon results. Defaults to config."
+          },
+          "config": {
+            "$ref": "#/components/schemas/MatchConfigSchema",
+            "description": "Tolerance and direction knobs"
+          },
+          "single_batch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Single Batch",
+            "description": "Filename (e.g. ingest_batch_0001.csv) to test just one batch instead of full run."
+          }
+        },
+        "type": "object",
+        "title": "ReconRunRequest"
+      },
+      "ReconRunResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "total_matched": {
+            "type": "integer",
+            "title": "Total Matched"
+          },
+          "tier_breakdown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Tier Breakdown"
+          },
+          "cache_remaining_count": {
+            "type": "integer",
+            "title": "Cache Remaining Count"
+          },
+          "ingest_unmatched_count": {
+            "type": "integer",
+            "title": "Ingest Unmatched Count"
+          },
+          "ambiguous_count": {
+            "type": "integer",
+            "title": "Ambiguous Count"
+          },
+          "out_dir": {
+            "type": "string",
+            "title": "Out Dir"
+          },
+          "output_files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Output Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "total_matched",
+          "tier_breakdown",
+          "cache_remaining_count",
+          "ingest_unmatched_count",
+          "ambiguous_count",
+          "out_dir",
+          "output_files"
+        ],
+        "title": "ReconRunResponse"
+      },
+      "RestoreBatchRequest": {
+        "properties": {
+          "batch_filename": {
+            "type": "string",
+            "title": "Batch Filename",
+            "description": "Batch CSV filename to restore from .bak"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_filename"
+        ],
+        "title": "RestoreBatchRequest"
+      },
+      "RestoreBatchResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "file": {
+            "type": "string",
+            "title": "File"
+          },
+          "restored": {
+            "type": "boolean",
+            "title": "Restored"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "file",
+          "restored"
+        ],
+        "title": "RestoreBatchResponse"
+      },
+      "SplitReconResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "total_rows_loaded": {
+            "type": "integer",
+            "title": "Total Rows Loaded"
+          },
+          "cache_rows": {
+            "type": "integer",
+            "title": "Cache Rows"
+          },
+          "ingest_rows": {
+            "type": "integer",
+            "title": "Ingest Rows"
+          },
+          "cache_path": {
+            "type": "string",
+            "title": "Cache Path"
+          },
+          "batches_dir": {
+            "type": "string",
+            "title": "Batches Dir"
+          },
+          "manifest_path": {
+            "type": "string",
+            "title": "Manifest Path"
+          },
+          "batch_count": {
+            "type": "integer",
+            "title": "Batch Count"
+          },
+          "manifest": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestRecord"
+            },
+            "type": "array",
+            "title": "Manifest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "total_rows_loaded",
+          "cache_rows",
+          "ingest_rows",
+          "cache_path",
+          "batches_dir",
+          "manifest_path",
+          "batch_count",
+          "manifest"
+        ],
+        "title": "SplitReconResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

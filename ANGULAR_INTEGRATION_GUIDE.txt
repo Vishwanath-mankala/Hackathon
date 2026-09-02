@@ -1,0 +1,971 @@
+================================================================================
+RECONCILIATION & FEED PROCESSING API - ANGULAR INTEGRATION GUIDE
+================================================================================
+Backend Base URL: http://localhost:8000
+Swagger Docs:     http://localhost:8000/docs
+OpenAPI Schema:   http://localhost:8000/openapi.json
+Generated On:     2026-09-02
+
+This document provides complete instructions, TypeScript models, Angular HTTP
+service code, and concrete payload/response examples for integrating the FastAPI
+backend with an Angular 15+ / 16+ / 17+ application.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. Angular Setup & Environment Configuration
+2. TypeScript Interfaces & Models (Copy-paste into `recon.models.ts`)
+3. Angular HTTP Service Implementation (Copy-paste into `recon.service.ts`)
+4. Endpoint Catalog: Payloads, Responses & Examples
+   4.1 System Endpoints (/health, /)
+   4.2 Ingestion & Batching Endpoints (/api/feed/*)
+   4.3 Structural Gate Endpoints (/api/gate/*)
+   4.4 Reconciliation Engine Endpoints (/api/recon/*)
+   4.5 Diagnostics & Simulation Endpoints (/api/diagnostics/*)
+5. Angular Component Usage Examples
+6. File Uploads & CSV File Downloads Handling
+7. CORS & Proxy Configuration (proxy.conf.json)
+
+
+================================================================================
+1. ANGULAR SETUP & ENVIRONMENT CONFIGURATION
+================================================================================
+Make sure `provideHttpClient()` (standalone) or `HttpClientModule` (NgModule) is
+imported in your Angular app.
+
+In your `src/environments/environment.ts`:
+--------------------------------------------------
+export const environment = {
+  production: false,
+  apiBaseUrl: 'http://localhost:8000'
+};
+
+
+================================================================================
+2. TYPESCRIPT INTERFACES (src/app/models/recon.models.ts)
+================================================================================
+Copy and paste this directly into your Angular project:
+
+export interface HealthResponse {
+  status: string;
+  app_name: string;
+  version: string;
+  uptime_seconds: number;
+  timestamp: string;
+}
+
+export interface RootDiscoveryResponse {
+  message: string;
+  docs: string;
+  health: string;
+  endpoints: {
+    feed: string;
+    gate: string;
+    recon: string;
+    diagnostics: string;
+  };
+}
+
+export interface ManifestRecord {
+  sequence: number;
+  file: string;
+  row_count: number;
+  declared_record_count: number;
+  declared_control_total: number;
+  min_booking_date?: string | null;
+  max_booking_date?: string | null;
+}
+
+export interface SplitReconResponse {
+  message: string;
+  total_rows_loaded: number;
+  cache_rows: number;
+  ingest_rows: number;
+  cache_path: string;
+  batches_dir: string;
+  manifest_path: string;
+  batch_count: number;
+  manifest: ManifestRecord[];
+}
+
+export interface ManifestResponse {
+  manifest_path: string;
+  total_batches: number;
+  total_declared_records: number;
+  total_declared_amount: number;
+  records: ManifestRecord[];
+}
+
+export interface BatchesListResponse {
+  batches_dir: string;
+  count: number;
+  files: string[];
+}
+
+export interface CheckDetail {
+  passed: boolean;
+  detail: string;
+}
+
+export interface GateResultSchema {
+  file: string;
+  passed: boolean;
+  checks: { [key: string]: CheckDetail };
+  reasons: string[];
+}
+
+export interface GateCheckRequest {
+  batch_filename: string;
+  declared_record_count?: number | null;
+  declared_control_total?: number | null;
+  expected_encoding?: string;
+}
+
+export interface GateAllRequest {
+  batches_dir?: string | null;
+  manifest_path?: string | null;
+  quarantine_dir?: string | null;
+}
+
+export interface GateSummaryResponse {
+  total_batches: number;
+  passed_count: number;
+  failed_count: number;
+  quarantined_count: number;
+  quarantine_dir?: string | null;
+  results: GateResultSchema[];
+}
+
+export interface MatchConfigSchema {
+  date_tolerance_days: number;
+  amount_abs_tolerance: number;
+  amount_pct_tolerance: number;
+  direction_mode: 'ignore' | 'same' | 'opposite';
+}
+
+export interface ReconRunRequest {
+  cache_path?: string | null;
+  manifest_path?: string | null;
+  batches_dir?: string | null;
+  out_dir?: string | null;
+  config: MatchConfigSchema;
+  single_batch?: string | null;
+}
+
+export interface ReconRunResponse {
+  message: string;
+  total_matched: number;
+  tier_breakdown: { [key: string]: number };
+  cache_remaining_count: number;
+  ingest_unmatched_count: number;
+  ambiguous_count: number;
+  out_dir: string;
+  output_files: {
+    matched: string;
+    unmatched_cache: string;
+    unmatched_ingest: string;
+    ambiguous: string;
+  };
+}
+
+export interface PaginatedQueryResponse<T = Record<string, any>> {
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  items: T[];
+}
+
+export interface AmbiguityDiagnosisRequest {
+  results_dir?: string | null;
+}
+
+export interface AmbiguityDiagnosisResponse {
+  total_ambiguous: number;
+  avg_candidates: number;
+  max_candidates: number;
+  ambiguity_by_tier: { [key: string]: number };
+  resolved_by_reference?: number | null;
+  resolved_by_reference_pct?: number | null;
+  top_accounts: { [account: string]: number };
+  top_amounts: { [amount: string]: number };
+  top_amounts_concentration_pct: number;
+  is_concentrated: boolean;
+  diagnostic_assessment: string;
+  output_detail_csv: string;
+}
+
+export interface CorruptBatchRequest {
+  batch_filename: string;
+  mode: 'truncate' | 'dropped_row' | 'duplicate_row' | 'tampered_amount' | 'missing_column' | 'bad_encoding';
+}
+
+export interface CorruptBatchResponse {
+  message: string;
+  file: string;
+  mode: string;
+  backup_path: string;
+}
+
+export interface RestoreBatchRequest {
+  batch_filename: string;
+}
+
+export interface RestoreBatchResponse {
+  message: string;
+  file: string;
+  restored: boolean;
+}
+
+
+================================================================================
+3. ANGULAR SERVICE IMPLEMENTATION (src/app/services/recon.service.ts)
+================================================================================
+Copy and paste this service directly into your Angular app:
+
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import { environment } from '../../environments/environment';
+import {
+  HealthResponse,
+  SplitReconResponse,
+  ManifestResponse,
+  BatchesListResponse,
+  GateCheckRequest,
+  GateResultSchema,
+  GateAllRequest,
+  GateSummaryResponse,
+  ReconRunRequest,
+  ReconRunResponse,
+  PaginatedQueryResponse,
+  AmbiguityDiagnosisRequest,
+  AmbiguityDiagnosisResponse,
+  CorruptBatchRequest,
+  CorruptBatchResponse,
+  RestoreBatchRequest,
+  RestoreBatchResponse
+} from '../models/recon.models';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class ReconciliationService {
+  private readonly baseUrl = environment.apiBaseUrl;
+
+  constructor(private http: HttpClient) {}
+
+  // --------------------------------------------------------------------------
+  // 1. System Endpoints
+  // --------------------------------------------------------------------------
+  getHealth(): Observable<HealthResponse> {
+    return this.http.get<HealthResponse>(`${this.baseUrl}/health`);
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. Ingestion & Batching (/api/feed)
+  // --------------------------------------------------------------------------
+  splitFeed(
+    file?: File | null,
+    inputPath?: string | null,
+    splitBy: 'size' | 'date' = 'size',
+    batchSize: number = 500,
+    outDir?: string | null
+  ): Observable<SplitReconResponse> {
+    const formData = new FormData();
+    if (file) {
+      formData.append('file', file, file.name);
+    }
+    if (inputPath) {
+      formData.append('input_path', inputPath);
+    }
+    formData.append('split_by', splitBy);
+    formData.append('batch_size', batchSize.toString());
+    if (outDir) {
+      formData.append('out_dir', outDir);
+    }
+    return this.http.post<SplitReconResponse>(`${this.baseUrl}/api/feed/split`, formData);
+  }
+
+  getManifest(manifestPath?: string): Observable<ManifestResponse> {
+    let params = new HttpParams();
+    if (manifestPath) {
+      params = params.set('manifest_path', manifestPath);
+    }
+    return this.http.get<ManifestResponse>(`${this.baseUrl}/api/feed/manifest`, { params });
+  }
+
+  listBatches(batchesDir?: string): Observable<BatchesListResponse> {
+    let params = new HttpParams();
+    if (batchesDir) {
+      params = params.set('batches_dir', batchesDir);
+    }
+    return this.http.get<BatchesListResponse>(`${this.baseUrl}/api/feed/batches`, { params });
+  }
+
+  // --------------------------------------------------------------------------
+  // 3. Structural Gate (/api/gate)
+  // --------------------------------------------------------------------------
+  checkBatch(req: GateCheckRequest): Observable<GateResultSchema> {
+    return this.http.post<GateResultSchema>(`${this.baseUrl}/api/gate/check-batch`, req);
+  }
+
+  checkAllBatches(req: GateAllRequest = {}): Observable<GateSummaryResponse> {
+    return this.http.post<GateSummaryResponse>(`${this.baseUrl}/api/gate/check-all`, req);
+  }
+
+  // --------------------------------------------------------------------------
+  // 4. Reconciliation Engine (/api/recon)
+  // --------------------------------------------------------------------------
+  runReconciliation(req: ReconRunRequest): Observable<ReconRunResponse> {
+    return this.http.post<ReconRunResponse>(`${this.baseUrl}/api/recon/run`, req);
+  }
+
+  getMatches(
+    page: number = 1,
+    pageSize: number = 50,
+    account?: string,
+    tier?: string
+  ): Observable<PaginatedQueryResponse> {
+    let params = new HttpParams()
+      .set('page', page.toString())
+      .set('page_size', pageSize.toString());
+    if (account) params = params.set('account', account);
+    if (tier) params = params.set('tier', tier);
+    return this.http.get<PaginatedQueryResponse>(`${this.baseUrl}/api/recon/matches`, { params });
+  }
+
+  getUnmatchedCache(
+    page: number = 1,
+    pageSize: number = 50,
+    account?: string
+  ): Observable<PaginatedQueryResponse> {
+    let params = new HttpParams()
+      .set('page', page.toString())
+      .set('page_size', pageSize.toString());
+    if (account) params = params.set('account', account);
+    return this.http.get<PaginatedQueryResponse>(`${this.baseUrl}/api/recon/unmatched-cache`, { params });
+  }
+
+  getUnmatchedIngest(
+    page: number = 1,
+    pageSize: number = 50,
+    account?: string
+  ): Observable<PaginatedQueryResponse> {
+    let params = new HttpParams()
+      .set('page', page.toString())
+      .set('page_size', pageSize.toString());
+    if (account) params = params.set('account', account);
+    return this.http.get<PaginatedQueryResponse>(`${this.baseUrl}/api/recon/unmatched-ingest`, { params });
+  }
+
+  getAmbiguousMatches(
+    page: number = 1,
+    pageSize: number = 50
+  ): Observable<PaginatedQueryResponse> {
+    const params = new HttpParams()
+      .set('page', page.toString())
+      .set('page_size', pageSize.toString());
+    return this.http.get<PaginatedQueryResponse>(`${this.baseUrl}/api/recon/ambiguous`, { params });
+  }
+
+  downloadCsv(filename: string): Observable<Blob> {
+    return this.http.get(`${this.baseUrl}/api/recon/download/${filename}`, {
+      responseType: 'blob'
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // 5. Diagnostics & Simulation (/api/diagnostics)
+  // --------------------------------------------------------------------------
+  diagnoseAmbiguity(req: AmbiguityDiagnosisRequest = {}): Observable<AmbiguityDiagnosisResponse> {
+    return this.http.post<AmbiguityDiagnosisResponse>(`${this.baseUrl}/api/diagnostics/ambiguity`, req);
+  }
+
+  corruptBatch(req: CorruptBatchRequest): Observable<CorruptBatchResponse> {
+    return this.http.post<CorruptBatchResponse>(`${this.baseUrl}/api/diagnostics/corrupt-batch`, req);
+  }
+
+  restoreBatch(req: RestoreBatchRequest): Observable<RestoreBatchResponse> {
+    return this.http.post<RestoreBatchResponse>(`${this.baseUrl}/api/diagnostics/restore-batch`, req);
+  }
+}
+
+
+================================================================================
+4. ENDPOINT CATALOG: PAYLOADS, RESPONSES & EXAMPLES
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 SYSTEM: GET /health
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /health
+Headers:     Accept: application/json
+Payload:     None
+
+Response (200 OK):
+{
+  "status": "healthy",
+  "app_name": "Reconciliation & Feed Processing API",
+  "version": "1.0.0",
+  "uptime_seconds": 124.58,
+  "timestamp": "2026-09-02T11:16:30.123456Z"
+}
+
+--------------------------------------------------------------------------------
+4.2 INGESTION: POST /api/feed/split
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/feed/split
+Headers:     Content-Type: multipart/form-data
+Payload (Form Data):
+  - file:       [binary CSV file] (Optional)
+  - input_path: "C:/path/to/recon.csv" (Optional string if no file uploaded)
+  - split_by:   "size" | "date" (Default: "size")
+  - batch_size: 500 (Default: 500)
+  - out_dir:    "C:/custom/output" (Optional string)
+
+Response (200 OK):
+{
+  "message": "Successfully split 60000 rows into cache and 65 ingestion batches.",
+  "total_rows_loaded": 60000,
+  "cache_rows": 37123,
+  "ingest_rows": 32304,
+  "cache_path": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\cache_gl_cashbook.csv",
+  "batches_dir": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\ingestion_batches",
+  "manifest_path": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\ingestion_batches\\manifest.csv",
+  "batch_count": 65,
+  "manifest": [
+    {
+      "sequence": 1,
+      "file": "ingest_batch_0001.csv",
+      "row_count": 500,
+      "declared_record_count": 500,
+      "declared_control_total": 1284500.5,
+      "min_booking_date": "2025-01-02",
+      "max_booking_date": "2025-01-05"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.3 INGESTION: GET /api/feed/manifest
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/feed/manifest
+Query Param: manifest_path (optional)
+Payload:     None
+
+Response (200 OK):
+{
+  "manifest_path": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\ingestion_batches\\manifest.csv",
+  "total_batches": 65,
+  "total_declared_records": 32304,
+  "total_declared_amount": 89452300.25,
+  "records": [
+    {
+      "sequence": 1,
+      "file": "ingest_batch_0001.csv",
+      "row_count": 500,
+      "declared_record_count": 500,
+      "declared_control_total": 1284500.5,
+      "min_booking_date": "2025-01-02",
+      "max_booking_date": "2025-01-05"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.4 INGESTION: GET /api/feed/batches
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/feed/batches
+Query Param: batches_dir (optional)
+Payload:     None
+
+Response (200 OK):
+{
+  "batches_dir": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\ingestion_batches",
+  "count": 65,
+  "files": [
+    "ingest_batch_0001.csv",
+    "ingest_batch_0002.csv",
+    "ingest_batch_0065.csv"
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.5 STRUCTURAL GATE: POST /api/gate/check-batch
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/gate/check-batch
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "batch_filename": "ingest_batch_0001.csv",
+  "declared_record_count": 500,
+  "declared_control_total": 1284500.50,
+  "expected_encoding": "utf-8"
+}
+Note: declared_record_count & declared_control_total can be null/omitted;
+the server will look them up automatically from manifest.csv.
+
+Response (200 OK - When Passing):
+{
+  "file": "ingest_batch_0001.csv",
+  "passed": true,
+  "checks": {
+    "encoding": {
+      "passed": true,
+      "detail": "decoded cleanly as utf-8"
+    },
+    "required_sections": {
+      "passed": true,
+      "detail": "all required columns present"
+    },
+    "record_count": {
+      "passed": true,
+      "detail": "actual matches declared (500)"
+    },
+    "control_total": {
+      "passed": true,
+      "detail": "actual matches declared (1284500.5)"
+    }
+  },
+  "reasons": []
+}
+
+Response (200 OK - When Failing):
+{
+  "file": "ingest_batch_0065.csv",
+  "passed": false,
+  "checks": {
+    "encoding": { "passed": true, "detail": "decoded cleanly as utf-8" },
+    "required_sections": { "passed": true, "detail": "all required columns present" },
+    "record_count": { "passed": false, "detail": "actual=499 vs declared=500" },
+    "control_total": { "passed": false, "detail": "actual=1280000.0 vs declared=1284500.5 (diff=4500.50)" }
+  },
+  "reasons": [
+    "RECORD_COUNT: actual=499 vs declared=500",
+    "CONTROL_TOTAL: actual=1280000.0 vs declared=1284500.5 (diff=4500.50)"
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.6 STRUCTURAL GATE: POST /api/gate/check-all
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/gate/check-all
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "batches_dir": null,
+  "manifest_path": null,
+  "quarantine_dir": null
+}
+
+Response (200 OK):
+{
+  "total_batches": 65,
+  "passed_count": 64,
+  "failed_count": 1,
+  "quarantined_count": 1,
+  "quarantine_dir": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\quarantined_batches",
+  "results": [
+    {
+      "file": "ingest_batch_0001.csv",
+      "passed": true,
+      "checks": { ... },
+      "reasons": []
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.7 RECONCILIATION: POST /api/recon/run
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/recon/run
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "config": {
+    "date_tolerance_days": 3,
+    "amount_abs_tolerance": 1.0,
+    "amount_pct_tolerance": 0.0,
+    "direction_mode": "ignore"
+  },
+  "single_batch": "ingest_batch_0001.csv"
+}
+Note:
+- Set single_batch to null or omit it to run through ALL batches in the manifest.
+- direction_mode can be: "ignore" | "same" | "opposite"
+
+Response (200 OK):
+{
+  "message": "Reconciliation run completed successfully.",
+  "total_matched": 450,
+  "tier_breakdown": {
+    "TIER_1_EXACT": 414,
+    "TIER_4_AMOUNT_TOLERANCE": 30,
+    "TIER_2_DATE_TOLERANCE": 3,
+    "TIER_3_REFERENCE_MATCH": 3
+  },
+  "cache_remaining_count": 36673,
+  "ingest_unmatched_count": 50,
+  "ambiguous_count": 250,
+  "out_dir": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results",
+  "output_files": {
+    "matched": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\matched_transactions.csv",
+    "unmatched_cache": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\unmatched_cache_remaining.csv",
+    "unmatched_ingest": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\unmatched_ingestion_exceptions.csv",
+    "ambiguous": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\ambiguous_matches_for_review.csv"
+  }
+}
+
+--------------------------------------------------------------------------------
+4.8 RECONCILIATION: GET /api/recon/matches
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/recon/matches
+Query Params:
+  - page:      1 (default: 1)
+  - page_size: 50 (default: 50, max: 1000)
+  - account:   "ACC-1234" (optional filter)
+  - tier:      "TIER_1_EXACT" (optional filter)
+Payload:     None
+
+Response (200 OK):
+{
+  "total": 450,
+  "page": 1,
+  "page_size": 2,
+  "total_pages": 225,
+  "items": [
+    {
+      "matchId": "f95a468e-9097-40b9-83bc-2231ff614532",
+      "matchDate": "2026-09-02",
+      "matchRule": "TIER_1_EXACT",
+      "matchedBy": "rule_engine",
+      "wasPreviouslyMismatched": "0",
+      "internal_txn_id": "TXN_INT_00192",
+      "external_txn_id": "TXN_EXT_00012",
+      "account": "9823471029",
+      "currency": "EUR",
+      "cache_amount": "1450.00",
+      "ingest_amount": "1450.00",
+      "cache_date": "2025-01-03",
+      "ingest_date": "2025-01-03",
+      "cache_reference": "INV-2025-0012",
+      "ingest_reference": "INV-2025-0012",
+      "batch_file": "ingest_batch_0001.csv"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.9 RECONCILIATION: GET /api/recon/unmatched-cache
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/recon/unmatched-cache
+Query Params: page, page_size, account
+
+Response (200 OK):
+{
+  "total": 36673,
+  "page": 1,
+  "page_size": 1,
+  "total_pages": 36673,
+  "items": [
+    {
+      "internal_txn_id": "TXN_INT_00001",
+      "account": "1002348911",
+      "currency": "USD",
+      "amount": "3499.00",
+      "debit_credit": "CR",
+      "txn_date": "2025-01-02",
+      "value_date": "2025-01-02",
+      "status": "unmatched"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.10 RECONCILIATION: GET /api/recon/unmatched-ingest
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/recon/unmatched-ingest
+Query Params: page, page_size, account
+
+Response (200 OK):
+{
+  "total": 50,
+  "page": 1,
+  "page_size": 1,
+  "total_pages": 50,
+  "items": [
+    {
+      "external_txn_id": "TXN_EXT_00492",
+      "account": "887123901",
+      "currency": "GBP",
+      "amount": "12000.00",
+      "debit_credit": "DR",
+      "booking_date": "2025-01-04",
+      "value_date": "2025-01-04",
+      "reference": "UNKNOWN-TRANSFER-99",
+      "_source_batch": "ingest_batch_0001.csv"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.11 RECONCILIATION: GET /api/recon/ambiguous
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/recon/ambiguous
+Query Params: page, page_size
+
+Response (200 OK):
+{
+  "total": 250,
+  "page": 1,
+  "page_size": 1,
+  "total_pages": 250,
+  "items": [
+    {
+      "tier": "TIER_1_EXACT",
+      "ingest_external_txn_id": "TXN_EXT_00104",
+      "candidate_internal_txn_ids": "['TXN_INT_00341', 'TXN_INT_00892']",
+      "chosen_internal_txn_id": "TXN_INT_00341",
+      "chosen_by_reference_score": "2",
+      "disambiguated_by_reference": "True",
+      "batch_file": "ingest_batch_0001.csv"
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+4.12 RECONCILIATION: GET /api/recon/download/{filename}
+--------------------------------------------------------------------------------
+Method:      GET
+Path:        /api/recon/download/matched_transactions.csv
+Headers:     Accept: text/csv
+Payload:     None
+Response:    Binary CSV stream (Content-Disposition: attachment)
+
+Valid filenames:
+  - matched_transactions.csv
+  - unmatched_cache_remaining.csv
+  - unmatched_ingestion_exceptions.csv
+  - ambiguous_matches_for_review.csv
+  - structural_gate_log.csv
+  - cache_gl_cashbook.csv
+  - manifest.csv
+  - any batch file, e.g. ingest_batch_0001.csv
+
+--------------------------------------------------------------------------------
+4.13 DIAGNOSTICS: POST /api/diagnostics/ambiguity
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/diagnostics/ambiguity
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "results_dir": null
+}
+
+Response (200 OK):
+{
+  "total_ambiguous": 250,
+  "avg_candidates": 2.34,
+  "max_candidates": 6,
+  "ambiguity_by_tier": {
+    "TIER_1_EXACT": 210,
+    "TIER_2_DATE_TOLERANCE": 40
+  },
+  "resolved_by_reference": 185,
+  "resolved_by_reference_pct": 74.0,
+  "top_accounts": {
+    "9823471029": 45,
+    "1002348911": 32
+  },
+  "top_amounts": {
+    "500.00": 80,
+    "1250.00": 45
+  },
+  "top_amounts_concentration_pct": 68.5,
+  "is_concentrated": true,
+  "diagnostic_assessment": "Ambiguity is CONCENTRATED (68.5% in top 15 recurring amounts). Disambiguation via reference text or targeted rules will resolve the majority of ties.",
+  "output_detail_csv": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\recon_results\\ambiguity_diagnostic_detail.csv"
+}
+
+--------------------------------------------------------------------------------
+4.14 DIAGNOSTICS: POST /api/diagnostics/corrupt-batch
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/diagnostics/corrupt-batch
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "batch_filename": "ingest_batch_0065.csv",
+  "mode": "truncate"
+}
+Available modes:
+  - "truncate":        Removes last row without updating trailer totals.
+  - "dropped_row":     Silently drops a row in the middle of the file.
+  - "duplicate_row":   Duplicates the first row (double-send simulation).
+  - "tampered_amount": Modifies one transaction amount (+500.00).
+  - "missing_column":  Removes the 'reference' or 'narrative' column.
+  - "bad_encoding":    Re-encodes the file as raw Latin-1 instead of UTF-8.
+
+Response (200 OK):
+{
+  "message": "Successfully injected 'truncate' corruption into ingest_batch_0065.csv.",
+  "file": "ingest_batch_0065.csv",
+  "mode": "truncate",
+  "backup_path": "C:\\Projects\\Hackathon\\File-Gen Scripts\\OutPut\\ingestion_batches\\ingest_batch_0065.csv.bak"
+}
+
+--------------------------------------------------------------------------------
+4.15 DIAGNOSTICS: POST /api/diagnostics/restore-batch
+--------------------------------------------------------------------------------
+Method:      POST
+Path:        /api/diagnostics/restore-batch
+Headers:     Content-Type: application/json
+Payload (JSON):
+{
+  "batch_filename": "ingest_batch_0065.csv"
+}
+
+Response (200 OK):
+{
+  "message": "Successfully restored ingest_batch_0065.csv from backup.",
+  "file": "ingest_batch_0065.csv",
+  "restored": true
+}
+
+
+================================================================================
+5. ANGULAR COMPONENT USAGE EXAMPLES
+================================================================================
+
+Example 1: Running Reconciliation from a Component
+--------------------------------------------------
+import { Component } from '@angular/core';
+import { ReconciliationService } from './services/recon.service';
+
+@Component({
+  selector: 'app-recon-runner',
+  template: `
+    <button (click)="runRecon()" [disabled]="loading">Start Reconciliation</button>
+    <div *ngIf="result">
+      <h3>Matched: {{ result.total_matched }}</h3>
+      <p>Cache Remaining: {{ result.cache_remaining_count }}</p>
+      <p>Ambiguous Reviews: {{ result.ambiguous_count }}</p>
+    </div>
+  `
+})
+export class ReconRunnerComponent {
+  loading = false;
+  result: any;
+
+  constructor(private reconService: ReconciliationService) {}
+
+  runRecon() {
+    this.loading = true;
+    this.reconService.runReconciliation({
+      config: {
+        date_tolerance_days: 3,
+        amount_abs_tolerance: 1.00,
+        amount_pct_tolerance: 0.0,
+        direction_mode: 'ignore'
+      }
+    }).subscribe({
+      next: (res) => {
+        this.result = res;
+        this.loading = false;
+      },
+      error: (err) => {
+        console.error('Reconciliation failed:', err);
+        this.loading = false;
+      }
+    });
+  }
+}
+
+
+Example 2: Uploading & Splitting a File
+--------------------------------------------------
+onFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.files && input.files.length > 0) {
+    const file = input.files[0];
+    this.reconService.splitFeed(file, null, 'size', 500).subscribe({
+      next: (res) => {
+        console.log('Feed split successfully. Created batches:', res.batch_count);
+      },
+      error: (err) => console.error(err)
+    });
+  }
+}
+
+
+================================================================================
+6. FILE UPLOADS & CSV FILE DOWNLOADS HANDLING
+================================================================================
+
+Downloading CSVs in Angular:
+----------------------------
+downloadFile(filename: string) {
+  this.reconService.downloadCsv(filename).subscribe((blob: Blob) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  });
+}
+
+
+================================================================================
+7. CORS & PROXY CONFIGURATION
+================================================================================
+The FastAPI backend is already configured with full CORS support:
+  allow_origins=["*"]
+  allow_credentials=True
+  allow_methods=["*"]
+  allow_headers=["*"]
+
+Alternatively, if you prefer using an Angular CLI local dev proxy:
+Create `proxy.conf.json` in your Angular project root:
+------------------------------------------------------
+{
+  "/api": {
+    "target": "http://localhost:8000",
+    "secure": false,
+    "changeOrigin": true
+  },
+  "/health": {
+    "target": "http://localhost:8000",
+    "secure": false,
+    "changeOrigin": true
+  }
+}
+
+In your `angular.json`:
+"architect": {
+  "serve": {
+    "options": {
+      "proxyConfig": "proxy.conf.json"
+    }
+  }
+}
+
+Run your Angular application with:
+`ng serve`
+================================================================================
+

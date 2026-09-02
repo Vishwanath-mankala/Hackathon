@@ -182,7 +182,7 @@ def write_batches_by_date(ingest_df, out_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="Path to the raw 60k+ row recon CSV")
-    ap.add_argument("--out-dir", default="/mnt/user-data/outputs", help="Output directory")
+    ap.add_argument("--out-dir", default=".\File-Gen Scripts\OutPut", help="Output directory")
     ap.add_argument("--split-by", choices=["size", "date"], default="size",
                      help="'size' = fixed-row batches, 'date' = one file per booking_date")
     ap.add_argument("--batch-size", type=int, default=500,
