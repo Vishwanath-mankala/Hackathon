@@ -294,7 +294,7 @@ class RuleEngine:
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
-def run(cache_path, manifest_path, batches_dir, out_dir, cfg: MatchConfig):
+def run(cache_path, manifest_path, batches_dir, out_dir, cfg: MatchConfig, single_batch=None):
     os.makedirs(out_dir, exist_ok=True)
 
     cache_df = pd.read_csv(cache_path, dtype=str, keep_default_na=False)
@@ -303,6 +303,14 @@ def run(cache_path, manifest_path, batches_dir, out_dir, cfg: MatchConfig):
 
     manifest = pd.read_csv(manifest_path, dtype=str, keep_default_na=False)
     manifest = manifest.sort_values("sequence", key=lambda s: s.astype(int))
+
+    if single_batch:
+        manifest = manifest[manifest["file"] == single_batch]
+        if manifest.empty:
+            print(f"ERROR: '{single_batch}' not found in manifest. "
+                  f"Check the filename matches exactly what's listed in manifest.csv.")
+            return
+        print(f"Running against a single batch only: {single_batch}")
 
     quarantine_dir = os.path.join(out_dir, "quarantined_batches")
     gate_log = []
@@ -365,6 +373,8 @@ if __name__ == "__main__":
     ap.add_argument("--amount-abs-tolerance", type=float, default=1.00)
     ap.add_argument("--amount-pct-tolerance", type=float, default=0.0)
     ap.add_argument("--direction-mode", choices=["same", "opposite", "ignore"], default="ignore")
+    ap.add_argument("--single-batch", default=None,
+                     help="Filename (e.g. ingest_batch_0001.csv) to run just one batch, for quick testing")
     args = ap.parse_args()
 
     cfg = MatchConfig(
@@ -373,4 +383,4 @@ if __name__ == "__main__":
         amount_pct_tolerance=args.amount_pct_tolerance,
         direction_mode=args.direction_mode,
     )
-    run(args.cache, args.manifest, args.batches_dir, args.out_dir, cfg)
+    run(args.cache, args.manifest, args.batches_dir, args.out_dir, cfg, single_batch=args.single_batch)
