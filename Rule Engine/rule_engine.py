@@ -194,11 +194,16 @@ class RuleEngine:
     def __init__(self, cache_df: pd.DataFrame, cfg: MatchConfig):
         self.cfg = cfg
         self.cache = []
+        self.cache_by_account = {}
         for _, row in cache_df.iterrows():
             r = row.to_dict()
             r["amount_abs"] = abs(parse_amount(r.get("amount"))) if parse_amount(r.get("amount")) is not None else None
             r["date_parsed"] = parse_date(r.get("value_date") or r.get("txn_date"))
             self.cache.append(r)
+            acc = str(r.get("account", "")).strip()
+            if acc not in self.cache_by_account:
+                self.cache_by_account[acc] = []
+            self.cache_by_account[acc].append(r)
 
         self.matches = []
         self.ambiguous = []
@@ -220,8 +225,14 @@ class RuleEngine:
                 self.unmatched_ingest.append(ingest_row)
 
     def _match_one(self, ingest_row, batch_file):
+        acc = str(ingest_row.get("account", "")).strip()
+        account_cache = self.cache_by_account.get(acc, [])
+        if not account_cache:
+            return False
+
         for tier_name, tier_fn in TIERS:
             candidates = [c for c in self.cache if tier_fn(c, ingest_row, self.cfg)]
+            candidates = [c for c in account_cache if tier_fn(c, ingest_row, self.cfg)]
             if not candidates:
                 continue
             if len(candidates) > 1:
@@ -250,6 +261,7 @@ class RuleEngine:
                 })
             chosen = candidates[0]
             self._record_match(chosen, ingest_row, tier_name, batch_file)
+            account_cache.remove(chosen)
             self.cache.remove(chosen)
             return True
         return False

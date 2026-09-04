@@ -1,0 +1,2 @@
+tier,ingest_external_txn_id,candidate_internal_txn_ids,chosen_internal_txn_id,chosen_by_reference_score,disambiguated_by_reference,batch_file
+TIER_1_EXACT,984373260473,"['806316784017', '132316151906']",806316784017,0,False,ingest_batch_0001.csv
