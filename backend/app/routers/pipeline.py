@@ -231,3 +231,27 @@ def publish_batch_results(batch_id: str):
 def get_published_events(limit: int = Query(50, ge=1, le=200)):
     """Returns event history published to downstream consumers."""
     return publish_service.get_events(limit)
+
+
+# =============================================================================
+# Agent Platform Integration Endpoints (CrewAI / Multi-Agent Platform)
+# =============================================================================
+@router.get("/agent/status")
+def get_agent_status():
+    """
+    Returns the configuration and connectivity status of the external CrewAI
+    or Multi-Agent platform API.
+    """
+    from app.services.agentic_anomaly_service import agentic_anomaly_service
+    return agentic_anomaly_service.agent_bridge.test_connection()
+
+
+@router.post("/agent/test-connection")
+def test_agent_connection():
+    """
+    Tests live connectivity to the configured CrewAI agent platform.
+    """
+    from app.services.agentic_anomaly_service import agentic_anomaly_service
+    return agentic_anomaly_service.agent_bridge.test_connection()
+
+

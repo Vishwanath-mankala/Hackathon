@@ -136,3 +136,4 @@ class PipelineOverview(BaseModel):
     sla_breaches: int
     at_risk_count: int
     batches: List[BatchRecord]
+

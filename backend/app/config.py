@@ -2,7 +2,7 @@
 Application Configuration.
 """
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     cors_origins: List[str] = ["*"]
+
+    # =========================================================================
+    # Agent Platform Integration (CrewAI / Multi-Agent API)
+    # =========================================================================
+    crewai_enabled: bool = False
+    crewai_api_url: Optional[str] = None  # e.g. "http://localhost:8001/api/crew/anomaly-detection"
+    crewai_api_key: Optional[str] = None
+    crewai_timeout_seconds: float = 30.0
 
     model_config = {
         "env_file": ".env",

@@ -1,7 +1,7 @@
 """
 Agentic Anomaly Scoring & Auto-Remediation Service.
 Performs row-level rule validation across full batch context, agentic anomaly evaluation
-(with CrewAI API integration hook and intelligent local agent evaluator), safe auto-remediation,
+(with CrewAI / Multi-Agent Platform API integration hooks), safe auto-remediation,
 re-validation loop, and human escalation queue management.
 """
 import re
@@ -12,23 +12,187 @@ import urllib.request
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
+from pathlib import Path
 
 from app.models.pipeline_models import AnomalyItem
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Valid Currency codes
 VALID_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "INR"}
-
-# Valid GL Accounts Cache sample (populated from cache_gl_cashbook or default list)
 DEFAULT_KNOWN_ACCOUNTS = {f"ACC#{str(i).zfill(5)}" for i in range(1, 100)}
+
+
+class CrewAIAgentBridge:
+    """
+    Dedicated Integration Bridge for CrewAI / Multi-Agent Platforms.
+    
+    ===========================================================================
+    HOW TO CONNECT YOUR CREWAI AGENTS:
+    ===========================================================================
+    1. Set environment variables in your .env file or server environment:
+       CREWAI_ENABLED=true
+       CREWAI_API_URL="http://localhost:8001/api/crew/analyze"
+       CREWAI_API_KEY="your-crewai-token-here"
+
+    2. Inputs Supported:
+       - Direct raw file transmission (CSV, TXT, MT940, BAI2) via `analyze_file_via_agent_api`
+       - Structured JSON rows and preliminary anomaly candidates via `enrich_anomalies_via_api`
+
+    3. Expected CrewAI Agent Response Format:
+       {
+           "status": "success",
+           "agent_name": "Reconciliation Anomaly Triage Agent",
+           "anomalies": [
+               {
+                   "id": "<anomaly_uuid>",
+                   "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+                   "category": "FORMAT" | "REFERENTIAL" | "DUPLICATE" | "BUSINESS_RULE",
+                   "description": "Agent analysis rationale...",
+                   "confidence_score": 0.95,
+                   "auto_remediable": true | false,
+                   "suggested_fix": {"field_name": "corrected_value"},
+                   "remediation_notes": "Rationale for suggested action"
+               }
+           ]
+       }
+    ===========================================================================
+    """
+
+    def __init__(self, api_url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = 30.0):
+        self.api_url = api_url or settings.crewai_api_url
+        self.api_key = api_key or settings.crewai_api_key
+        self.timeout = timeout or settings.crewai_timeout_seconds
+        self.enabled = settings.crewai_enabled or bool(self.api_url)
+
+    def is_enabled(self) -> bool:
+        return bool(self.api_url) and (self.enabled or settings.crewai_enabled)
+
+    def test_connection(self) -> Dict[str, Any]:
+        """Validates connectivity to the configured CrewAI agent platform."""
+        if not self.api_url:
+            return {
+                "connected": False,
+                "configured": False,
+                "message": "CREWAI_API_URL not configured. Set CREWAI_API_URL in .env to enable external agents.",
+                "local_fallback_active": True
+            }
+
+        try:
+            req = urllib.request.Request(
+                f"{self.api_url}/health" if not self.api_url.endswith("/health") else self.api_url,
+                headers={"Authorization": f"Bearer {self.api_key or ''}"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return {
+                    "connected": response.status in [200, 204],
+                    "configured": True,
+                    "status_code": response.status,
+                    "url": self.api_url,
+                    "local_fallback_active": False
+                }
+        except Exception as e:
+            return {
+                "connected": False,
+                "configured": True,
+                "url": self.api_url,
+                "error": str(e),
+                "local_fallback_active": True,
+                "message": "CrewAI agent endpoint currently unreachable. Local intelligent agent evaluator active."
+            }
+
+    def analyze_file_via_agent_api(self, file_path: Path) -> Optional[List[Dict[str, Any]]]:
+        """
+        [PLACEHOLDER HOOK]: Sends raw CSV or TXT batch file to CrewAI Agent API.
+        Enables agents to perform end-to-end multi-agent document analysis.
+        """
+        if not self.is_enabled():
+            logger.info("CrewAI API URL not configured; using local agent pipeline for file analysis.")
+            return None
+
+        try:
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "X-File-Name": file_path.name,
+                "Authorization": f"Bearer {self.api_key or ''}"
+            }
+            req = urllib.request.Request(
+                f"{self.api_url}/analyze-file",
+                data=file_bytes,
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data.get("anomalies", [])
+        except Exception as e:
+            logger.warning(f"CrewAI file analysis API call failed ({e}); falling back to local evaluation.")
+            return None
+
+    def enrich_anomalies_via_api(
+        self,
+        anomalies: List[AnomalyItem],
+        df: pd.DataFrame
+    ) -> Optional[List[AnomalyItem]]:
+        """
+        [PLACEHOLDER HOOK]: Sends anomaly candidates and context rows to CrewAI
+        for multi-agent classification, confidence scoring, and suggested fixes.
+        """
+        if not self.is_enabled():
+            return None
+
+        try:
+            payload = {
+                "batch_context": {
+                    "total_rows": len(df),
+                    "columns": list(df.columns)
+                },
+                "candidates": [a.model_dump() for a in anomalies[:50]]
+            }
+            json_bytes = json.dumps(payload).encode("utf-8")
+
+            req = urllib.request.Request(
+                f"{self.api_url}/score-anomalies" if not self.api_url.endswith("/score-anomalies") else self.api_url,
+                data=json_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key or ''}"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if resp.status == 200:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    agent_items = result.get("anomalies", [])
+                    if agent_items:
+                        logger.info(f"Successfully received {len(agent_items)} anomaly scores from CrewAI agent.")
+                        enriched_list = []
+                        agent_map = {item.get("id"): item for item in agent_items if "id" in item}
+                        for a in anomalies:
+                            if a.id in agent_map:
+                                ai = agent_map[a.id]
+                                a.confidence_score = ai.get("confidence_score", a.confidence_score)
+                                a.description = ai.get("description", a.description)
+                                if "suggested_fix" in ai and ai["suggested_fix"]:
+                                    a.suggested_fix = ai["suggested_fix"]
+                                if "remediation_notes" in ai:
+                                    a.remediation_notes = ai["remediation_notes"]
+                            enriched_list.append(a)
+                        return enriched_list
+        except Exception as e:
+            logger.info(f"CrewAI agent API call fell back to local agent evaluator: {e}")
+            return None
 
 
 class AgenticAnomalyService:
     def __init__(self, crewai_api_url: Optional[str] = None, crewai_api_key: Optional[str] = None):
-        self.crewai_api_url = crewai_api_url
-        self.crewai_api_key = crewai_api_key
+        self.crewai_api_url = crewai_api_url or settings.crewai_api_url
+        self.crewai_api_key = crewai_api_key or settings.crewai_api_key
+        self.agent_bridge = CrewAIAgentBridge(self.crewai_api_url, self.crewai_api_key)
         self.known_accounts = set(DEFAULT_KNOWN_ACCOUNTS)
         self._load_gl_accounts_cache()
 
@@ -139,7 +303,6 @@ class AgenticAnomalyService:
 
             # Check: Debit/Credit flag
             if dc not in {"DR", "CR"}:
-                # Safe auto-remediation pattern check: e.g. "D", "C", "DEBIT", "CREDIT"
                 fix_dc = None
                 if dc in {"D", "DEBIT"}:
                     fix_dc = "DR"
@@ -186,7 +349,6 @@ class AgenticAnomalyService:
 
             # Check: Currency code
             if currency not in VALID_CURRENCIES:
-                # check if lowercase or whitespace
                 raw_curr = str(row_dict.get("currency", "")).strip()
                 if raw_curr.upper() in VALID_CURRENCIES:
                     fix_curr = raw_curr.upper()
@@ -228,7 +390,6 @@ class AgenticAnomalyService:
 
             # Check: Referential Integrity against GL Chart of Accounts
             if account and account not in self.known_accounts:
-                # Check for small formatting mismatch like "acc#00001" vs "ACC#00001"
                 normalized_acc = account.upper().replace(" ", "")
                 if normalized_acc in self.known_accounts:
                     anomalies.append(AnomalyItem(
@@ -301,29 +462,15 @@ class AgenticAnomalyService:
             if col in clean_df.columns:
                 clean_df.at[r_idx, col] = val
 
-        # If CrewAI endpoint is configured, trigger agentic enrichment
-        if self.crewai_api_url and anomalies:
-            self._invoke_crewai_enrichment(anomalies)
+        # =====================================================================
+        # AGENT INTEGRATION HOOK (CrewAI / Multi-Agent Platform API)
+        # =====================================================================
+        if (self.agent_bridge.is_enabled() or self.crewai_api_url) and anomalies:
+            enriched = self.agent_bridge.enrich_anomalies_via_api(anomalies, clean_df)
+            if enriched:
+                anomalies = enriched
 
         return clean_df, anomalies
-
-    def _invoke_crewai_enrichment(self, anomalies: List[AnomalyItem]):
-        """Calls external CrewAI API if URL is configured to enrich anomaly explanations."""
-        try:
-            payload = json.dumps([a.model_dump() for a in anomalies[:20]]).encode("utf-8")
-            req = urllib.request.Request(
-                self.crewai_api_url,
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.crewai_api_key or ''}"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=5) as response:
-                if response.status == 200:
-                    logger.info("Successfully received CrewAI agent assessment.")
-        except Exception as e:
-            logger.info(f"CrewAI external API not reachable or not configured ({e}); local agent engine active.")
 
 
 agentic_anomaly_service = AgenticAnomalyService()

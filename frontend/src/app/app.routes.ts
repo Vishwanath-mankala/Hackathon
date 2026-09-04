@@ -12,14 +12,14 @@ export const routes: Routes = [
       import('./pages/dashboard/dashboard.component').then((m) => m.DashboardComponent),
   },
   {
-    path: 'feed',
-    loadComponent: () =>
-      import('./pages/feed-ingestion/feed-ingestion.component').then((m) => m.FeedIngestionComponent),
-  },
-  {
     path: 'gate',
     loadComponent: () =>
       import('./pages/structural-gate/structural-gate.component').then((m) => m.StructuralGateComponent),
+  },
+  {
+    path: 'anomalies',
+    loadComponent: () =>
+      import('./pages/anomaly-queue/anomaly-queue.component').then((m) => m.AnomalyQueueComponent),
   },
   {
     path: 'recon',
@@ -27,9 +27,20 @@ export const routes: Routes = [
       import('./pages/recon-workbench/recon-workbench.component').then((m) => m.ReconWorkbenchComponent),
   },
   {
-    path: 'diagnostics',
+    path: 'estimator',
     loadComponent: () =>
-      import('./pages/diagnostics-lab/diagnostics-lab.component').then((m) => m.DiagnosticsLabComponent),
+      import('./pages/time-estimator/time-estimator.component').then((m) => m.TimeEstimatorComponent),
+  },
+  // Backward-compatible redirects
+  {
+    path: 'feed',
+    redirectTo: 'gate',
+    pathMatch: 'full',
+  },
+  {
+    path: 'diagnostics',
+    redirectTo: 'estimator',
+    pathMatch: 'full',
   },
   {
     path: '**',

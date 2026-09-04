@@ -16,46 +16,51 @@ import { ThemeService } from '../../core/services/theme.service';
 
       <!-- Navigation links -->
       <div class="flex-1 flex flex-col items-center gap-1 py-3 w-full">
+        <!-- 1. Status Board -->
         <a routerLink="/dashboard"
            routerLinkActive="bg-accent-action text-white"
            [routerLinkActiveOptions]="{ exact: true }"
            class="w-10 h-10 flex items-center justify-center text-text-secondary
                   hover:bg-surface-sunken hover:text-text-primary transition-colors"
-           title="Pipeline overview">
+           title="Batch Status Board & Telemetry">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
           </svg>
         </a>
 
-        <a routerLink="/feed"
-           routerLinkActive="bg-accent-action text-white"
-           class="w-10 h-10 flex items-center justify-center text-text-secondary
-                  hover:bg-surface-sunken hover:text-text-primary transition-colors"
-           title="Feed ingestion">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/>
-            <line x1="12" x2="12" y1="15" y2="3"/>
-          </svg>
-        </a>
-
+        <!-- 2. Structural Gate & Ingestion -->
         <a routerLink="/gate"
            routerLinkActive="bg-accent-action text-white"
            class="w-10 h-10 flex items-center justify-center text-text-secondary
                   hover:bg-surface-sunken hover:text-text-primary transition-colors"
-           title="Structural gate">
+           title="Structural Gate & Ingestion">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
           </svg>
         </a>
 
+        <!-- 3. Anomaly Scorer & Human Review Queue -->
+        <a routerLink="/anomalies"
+           routerLinkActive="bg-accent-action text-white"
+           class="w-10 h-10 flex items-center justify-center text-text-secondary
+                  hover:bg-surface-sunken hover:text-text-primary transition-colors"
+           title="Anomaly Scorer & Human Review Queue">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </a>
+
+        <!-- 4. GL Reconciliation Workbench -->
         <a routerLink="/recon"
            routerLinkActive="bg-accent-action text-white"
            class="w-10 h-10 flex items-center justify-center text-text-secondary
                   hover:bg-surface-sunken hover:text-text-primary transition-colors"
-           title="Reconciliation workbench">
+           title="GL Reconciliation Workbench">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M16 3h5v5"/><path d="M8 3H3v5"/>
@@ -65,15 +70,16 @@ import { ThemeService } from '../../core/services/theme.service';
           </svg>
         </a>
 
-        <a routerLink="/diagnostics"
+        <!-- 5. Processing Time Estimator & SLA Analytics -->
+        <a routerLink="/estimator"
            routerLinkActive="bg-accent-action text-white"
            class="w-10 h-10 flex items-center justify-center text-text-secondary
                   hover:bg-surface-sunken hover:text-text-primary transition-colors"
-           title="Diagnostics lab">
+           title="Processing Time Estimator & SLA Analytics">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/>
-            <path d="M8.5 2h7"/><path d="M7 16h10"/>
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
           </svg>
         </a>
       </div>

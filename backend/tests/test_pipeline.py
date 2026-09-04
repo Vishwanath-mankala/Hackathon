@@ -155,3 +155,4 @@ def test_publish_batch_results():
         assert stream_res.status_code == 200
         events = stream_res.json()
         assert any(e["batch_id"] == batch_id for e in events)
+

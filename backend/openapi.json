@@ -6,6 +6,638 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/pipeline/overview": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Pipeline Overview",
+        "description": "Returns high-level telemetry, active batches, SLA alerts, and processing metrics.",
+        "operationId": "get_pipeline_overview_api_pipeline_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineOverview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "List Batches",
+        "description": "Lists all ingested batch records with current processing stage and ETA.",
+        "operationId": "list_batches_api_pipeline_batches_get",
+        "parameters": [
+          {
+            "name": "stage",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by stage",
+              "title": "Stage"
+            },
+            "description": "Filter by stage"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BatchRecord"
+                  },
+                  "title": "Response List Batches Api Pipeline Batches Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Batch",
+        "description": "Returns full batch lifecycle details, metrics, and gate results.",
+        "operationId": "get_batch_api_pipeline_batches__batch_id__get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchRecord"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/ingest": {
+      "post": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Ingest Batch File",
+        "description": "Ingests a complete bank statement file without splitting.\nExecutes the structural gate and row-level anomaly pipeline automatically.",
+        "operationId": "ingest_batch_file_api_pipeline_ingest_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_batch_file_api_pipeline_ingest_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/simulate-sftp": {
+      "post": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Simulate Sftp Ingestion",
+        "description": "Simulates real-world automated SFTP drop arrival of a bank statement batch.",
+        "operationId": "simulate_sftp_ingestion_api_pipeline_simulate_sftp_post",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filename from sample batches to simulate SFTP arrival",
+              "title": "Filename"
+            },
+            "description": "Filename from sample batches to simulate SFTP arrival"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/gate": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Batch Gate Details",
+        "description": "Returns the file-level structural gate inspection report.",
+        "operationId": "get_batch_gate_details_api_pipeline_batches__batch_id__gate_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructuralGateDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/anomalies": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Batch Anomalies",
+        "description": "Returns detected row anomalies, auto-remediations, and human escalation queue.",
+        "operationId": "get_batch_anomalies_api_pipeline_batches__batch_id__anomalies_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status (AUTO_REMEDIATED, ESCALATED, etc.)",
+              "title": "Status"
+            },
+            "description": "Filter by status (AUTO_REMEDIATED, ESCALATED, etc.)"
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by severity",
+              "title": "Severity"
+            },
+            "description": "Filter by severity"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AnomalyItem"
+                  },
+                  "title": "Response Get Batch Anomalies Api Pipeline Batches  Batch Id  Anomalies Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/anomalies/{anomaly_id}/resolve": {
+      "post": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Resolve Human Escalation",
+        "description": "Analyst review action:\n- APPROVE: accepts suggested fix (re-enters rule engine for re-validation)\n- OVERRIDE: applies manual values\n- QUARANTINE: isolates row from matching",
+        "operationId": "resolve_human_escalation_api_pipeline_batches__batch_id__anomalies__anomaly_id__resolve_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "anomaly_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Anomaly Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HumanResolveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchRecord"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/recon": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Batch Reconciliation",
+        "description": "Returns GL tiered matching breakdown, matched pairs, and unmatched reconciling items.",
+        "operationId": "get_batch_reconciliation_api_pipeline_batches__batch_id__recon_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/estimator": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Time Estimate",
+        "description": "Returns granular processing time breakdown, throughput benchmarks, and SLA compliance status.",
+        "operationId": "get_time_estimate_api_pipeline_batches__batch_id__estimator_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimeEstimate"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/batches/{batch_id}/publish": {
+      "post": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Publish Batch Results",
+        "description": "Broadcasts batch completion and reconciliation summary to downstream message bus.",
+        "operationId": "publish_batch_results_api_pipeline_batches__batch_id__publish_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishEvent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/publish/events": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Published Events",
+        "description": "Returns event history published to downstream consumers.",
+        "operationId": "get_published_events_api_pipeline_publish_events_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublishEvent"
+                  },
+                  "title": "Response Get Published Events Api Pipeline Publish Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/agent/status": {
+      "get": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Get Agent Status",
+        "description": "Returns the configuration and connectivity status of the external CrewAI\nor Multi-Agent platform API.",
+        "operationId": "get_agent_status_api_pipeline_agent_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipeline/agent/test-connection": {
+      "post": {
+        "tags": [
+          "Pipeline Orchestrator"
+        ],
+        "summary": "Test Agent Connection",
+        "description": "Tests live connectivity to the configured CrewAI agent platform.",
+        "operationId": "test_agent_connection_api_pipeline_agent_test_connection_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/feed/split": {
       "post": {
         "tags": [
@@ -894,6 +1526,264 @@
         ],
         "title": "AmbiguityDiagnosisResponse"
       },
+      "AnomalyItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "row_index": {
+            "type": "integer",
+            "title": "Row Index"
+          },
+          "external_txn_id": {
+            "type": "string",
+            "title": "External Txn Id"
+          },
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "raw_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Amount"
+          },
+          "booking_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Booking Date"
+          },
+          "error_type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity",
+            "default": "MEDIUM"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category",
+            "default": "FORMAT"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "auto_remediable": {
+            "type": "boolean",
+            "title": "Auto Remediable",
+            "default": false
+          },
+          "suggested_fix": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Fix"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "DETECTED"
+          },
+          "remediation_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remediation Notes"
+          },
+          "confidence_score": {
+            "type": "number",
+            "title": "Confidence Score",
+            "default": 0.85
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "row_index",
+          "external_txn_id",
+          "account",
+          "error_type",
+          "description"
+        ],
+        "title": "AnomalyItem"
+      },
+      "BatchRecord": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "title": "File Size Bytes"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "SFTP"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": "RECEIVED"
+          },
+          "gate_passed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gate Passed"
+          },
+          "total_records": {
+            "type": "integer",
+            "title": "Total Records",
+            "default": 0
+          },
+          "valid_records_count": {
+            "type": "integer",
+            "title": "Valid Records Count",
+            "default": 0
+          },
+          "anomaly_count": {
+            "type": "integer",
+            "title": "Anomaly Count",
+            "default": 0
+          },
+          "auto_remediated_count": {
+            "type": "integer",
+            "title": "Auto Remediated Count",
+            "default": 0
+          },
+          "escalated_count": {
+            "type": "integer",
+            "title": "Escalated Count",
+            "default": 0
+          },
+          "quarantined_rows_count": {
+            "type": "integer",
+            "title": "Quarantined Rows Count",
+            "default": 0
+          },
+          "matched_count": {
+            "type": "integer",
+            "title": "Matched Count",
+            "default": 0
+          },
+          "unmatched_count": {
+            "type": "integer",
+            "title": "Unmatched Count",
+            "default": 0
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "time_estimate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimeEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gate_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StructuralGateDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gl_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GLMatchSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "published": {
+            "type": "boolean",
+            "title": "Published",
+            "default": false
+          },
+          "publish_event": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublishEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "filename",
+          "file_size_bytes",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "BatchRecord"
+      },
       "BatchesListResponse": {
         "properties": {
           "batches_dir": {
@@ -919,6 +1809,47 @@
           "files"
         ],
         "title": "BatchesListResponse"
+      },
+      "Body_ingest_batch_file_api_pipeline_ingest_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "UPLOAD"
+          },
+          "declared_record_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Record Count"
+          },
+          "declared_control_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Control Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_ingest_batch_file_api_pipeline_ingest_post"
       },
       "Body_split_feed_api_feed_split_post": {
         "properties": {
@@ -1053,6 +1984,59 @@
           "backup_path"
         ],
         "title": "CorruptBatchResponse"
+      },
+      "GLMatchSummary": {
+        "properties": {
+          "total_eligible_rows": {
+            "type": "integer",
+            "title": "Total Eligible Rows"
+          },
+          "matched_count": {
+            "type": "integer",
+            "title": "Matched Count"
+          },
+          "tier_1_exact": {
+            "type": "integer",
+            "title": "Tier 1 Exact"
+          },
+          "tier_2_date": {
+            "type": "integer",
+            "title": "Tier 2 Date"
+          },
+          "tier_3_ref": {
+            "type": "integer",
+            "title": "Tier 3 Ref"
+          },
+          "tier_4_amount": {
+            "type": "integer",
+            "title": "Tier 4 Amount"
+          },
+          "unmatched_reconciling_items": {
+            "type": "integer",
+            "title": "Unmatched Reconciling Items"
+          },
+          "ambiguous_count": {
+            "type": "integer",
+            "title": "Ambiguous Count"
+          },
+          "match_rate_pct": {
+            "type": "number",
+            "title": "Match Rate Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_eligible_rows",
+          "matched_count",
+          "tier_1_exact",
+          "tier_2_date",
+          "tier_3_ref",
+          "tier_4_amount",
+          "unmatched_reconciling_items",
+          "ambiguous_count",
+          "match_rate_pct"
+        ],
+        "title": "GLMatchSummary"
       },
       "GateAllRequest": {
         "properties": {
@@ -1237,6 +2221,93 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HumanResolveRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action",
+            "default": "APPROVE"
+          },
+          "override_values": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Override Values"
+          },
+          "analyst_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Notes"
+          }
+        },
+        "type": "object",
+        "title": "HumanResolveRequest"
+      },
+      "IngestionResponse": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage"
+          },
+          "record_count": {
+            "type": "integer",
+            "title": "Record Count"
+          },
+          "gate_passed": {
+            "type": "boolean",
+            "title": "Gate Passed"
+          },
+          "quarantined": {
+            "type": "boolean",
+            "title": "Quarantined"
+          },
+          "time_estimate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimeEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "filename",
+          "message",
+          "stage",
+          "record_count",
+          "gate_passed",
+          "quarantined"
+        ],
+        "title": "IngestionResponse"
+      },
       "ManifestRecord": {
         "properties": {
           "sequence": {
@@ -1410,6 +2481,101 @@
           "items"
         ],
         "title": "PaginatedQueryResponse"
+      },
+      "PipelineOverview": {
+        "properties": {
+          "total_batches": {
+            "type": "integer",
+            "title": "Total Batches"
+          },
+          "active_batches": {
+            "type": "integer",
+            "title": "Active Batches"
+          },
+          "completed_batches": {
+            "type": "integer",
+            "title": "Completed Batches"
+          },
+          "quarantined_batches": {
+            "type": "integer",
+            "title": "Quarantined Batches"
+          },
+          "total_records_processed": {
+            "type": "integer",
+            "title": "Total Records Processed"
+          },
+          "sla_breaches": {
+            "type": "integer",
+            "title": "Sla Breaches"
+          },
+          "at_risk_count": {
+            "type": "integer",
+            "title": "At Risk Count"
+          },
+          "batches": {
+            "items": {
+              "$ref": "#/components/schemas/BatchRecord"
+            },
+            "type": "array",
+            "title": "Batches"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_batches",
+          "active_batches",
+          "completed_batches",
+          "quarantined_batches",
+          "total_records_processed",
+          "sla_breaches",
+          "at_risk_count",
+          "batches"
+        ],
+        "title": "PipelineOverview"
+      },
+      "PublishEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "published_at": {
+            "type": "string",
+            "title": "Published At"
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel",
+            "default": "downstream-reconciliation-bus"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "delivered": {
+            "type": "boolean",
+            "title": "Delivered",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "batch_id",
+          "published_at",
+          "status",
+          "summary"
+        ],
+        "title": "PublishEvent"
       },
       "ReconRunRequest": {
         "properties": {
@@ -1627,6 +2793,191 @@
           "manifest"
         ],
         "title": "SplitReconResponse"
+      },
+      "StructuralGateDetails": {
+        "properties": {
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "file": {
+            "type": "string",
+            "title": "File"
+          },
+          "declared_record_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Record Count"
+          },
+          "actual_record_count": {
+            "type": "integer",
+            "title": "Actual Record Count"
+          },
+          "declared_control_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Control Total"
+          },
+          "actual_control_total": {
+            "type": "number",
+            "title": "Actual Control Total"
+          },
+          "checks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CheckDetail"
+            },
+            "type": "object",
+            "title": "Checks"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons"
+          },
+          "quarantined": {
+            "type": "boolean",
+            "title": "Quarantined",
+            "default": false
+          },
+          "quarantine_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quarantine Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "passed",
+          "file",
+          "actual_record_count",
+          "actual_control_total"
+        ],
+        "title": "StructuralGateDetails"
+      },
+      "TimeEstimate": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "title": "File Size Bytes"
+          },
+          "file_size_mb": {
+            "type": "number",
+            "title": "File Size Mb"
+          },
+          "total_records": {
+            "type": "integer",
+            "title": "Total Records"
+          },
+          "anomaly_count": {
+            "type": "integer",
+            "title": "Anomaly Count"
+          },
+          "throughput_records_per_sec": {
+            "type": "number",
+            "title": "Throughput Records Per Sec"
+          },
+          "estimated_parse_time_sec": {
+            "type": "number",
+            "title": "Estimated Parse Time Sec"
+          },
+          "estimated_gate_time_sec": {
+            "type": "number",
+            "title": "Estimated Gate Time Sec"
+          },
+          "estimated_rule_time_sec": {
+            "type": "number",
+            "title": "Estimated Rule Time Sec"
+          },
+          "estimated_anomaly_triage_sec": {
+            "type": "number",
+            "title": "Estimated Anomaly Triage Sec"
+          },
+          "estimated_gl_match_sec": {
+            "type": "number",
+            "title": "Estimated Gl Match Sec"
+          },
+          "total_estimated_seconds": {
+            "type": "number",
+            "title": "Total Estimated Seconds"
+          },
+          "eta_timestamp": {
+            "type": "string",
+            "title": "Eta Timestamp"
+          },
+          "sla_target_seconds": {
+            "type": "number",
+            "title": "Sla Target Seconds",
+            "default": 900.0
+          },
+          "sla_status": {
+            "type": "string",
+            "title": "Sla Status",
+            "default": "ON_TRACK"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "actual_duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Duration Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "file_size_bytes",
+          "file_size_mb",
+          "total_records",
+          "anomaly_count",
+          "throughput_records_per_sec",
+          "estimated_parse_time_sec",
+          "estimated_gate_time_sec",
+          "estimated_rule_time_sec",
+          "estimated_anomaly_triage_sec",
+          "estimated_gl_match_sec",
+          "total_estimated_seconds",
+          "eta_timestamp"
+        ],
+        "title": "TimeEstimate"
       },
       "ValidationError": {
         "properties": {

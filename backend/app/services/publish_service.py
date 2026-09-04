@@ -67,3 +67,4 @@ class PublishService:
 
 
 publish_service = PublishService()
+

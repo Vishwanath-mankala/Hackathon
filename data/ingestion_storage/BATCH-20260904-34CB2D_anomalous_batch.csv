@@ -1,0 +1,3 @@
+external_txn_id,account,currency,amount,debit_credit,booking_date,value_date,reference,narrative
+TXN-101,ACC#00001,usd,500.00,D,15/04/2023,15/04/2023,REF-AUTO,Auto-remediable line
+TXN-102,ACC#99999,USD,0.00,CR,2023-04-15,2023-04-15,REF-ESC,Zero amount line
