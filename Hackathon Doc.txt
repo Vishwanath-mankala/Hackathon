@@ -1,0 +1,12 @@
+Batch file validator and processing time estimator
+
+
+Problem statement: 
+ Banking sector deals with Batch file processing for end of reconciliation of account data.
+ Anomaly of data in those files causes processing delays, issues for up/down stream applications and incidents.
+
+What to do:
+Agentic flow to detect anomalies in the data present in the batch files.
+ Rectify if possible, if not possible trigger alarm for human review.
+ Predict the estimated processing time based on size of the file and quality of the data.
+ Publish in a dashboard for up/down stream consumers.

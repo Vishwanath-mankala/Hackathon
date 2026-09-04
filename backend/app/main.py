@@ -5,8 +5,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
-from app.routers import diagnostics, feed, gate, recon
+from app.routers import diagnostics, feed, gate, recon, pipeline
 
 start_time = datetime.now(timezone.utc)
 
@@ -28,6 +27,7 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(pipeline.router)
 app.include_router(feed.router, prefix="/api")
 app.include_router(gate.router, prefix="/api")
 app.include_router(recon.router, prefix="/api")

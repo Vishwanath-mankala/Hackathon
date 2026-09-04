@@ -1,0 +1,62 @@
+The basic problem
+
+Every day, two records of the same money movements exist in two different places:
+
+Your company's own books (the cashbook/GL) — what your accounting team recorded.
+The bank's statement — what the bank says actually happened in the account.
+
+In a perfect world, every entry in one would have a twin entry in the other, and they'd match instantly. In reality, they almost never line up perfectly — dates are off by a day, a bank fee gets subtracted, a description is worded differently, whatever. Reconciliation is the process of pairing up entries from these two lists and figuring out which ones truly represent the same real-world transaction.
+
+The "cache" and the "ingestion batch"
+
+Think of it like a lost-and-found system:
+
+The cache is a box of items already waiting to be claimed — this is your company's cashbook, entries that haven't been matched to anything yet.
+The ingestion batch is a new bag of items that just arrived — a fresh chunk of the bank statement, delivered in pieces (like one bag per day) instead of all at once.
+
+Every time a new bag (ingestion batch) arrives, the engine goes through it item by item and asks: "Is there anything in the box (cache) that this matches?"
+
+What a "match" actually means
+
+For any single bank-statement line, the engine looks at things like:
+
+Which account it belongs to
+How much money it involves
+What date it happened
+Any reference text or description attached to it
+
+It compares those details against everything still sitting in the cache box, looking for the item that's clearly its twin.
+
+Why "tiers"? Think of it as trying easier searches first, harder searches last
+
+Not every match is equally obvious. So instead of using one single rule, the engine tries a sequence of rules, starting with the strictest and most trustworthy, and only falling back to looser ones if the strict one finds nothing. That's what "tiers" means — think of it like search filters, tried in order:
+
+Tier 1 — the perfect match. Same account, same exact amount, same exact date. If this succeeds, you can trust it completely — there's basically no room for error.
+Tier 2 — close enough on timing. Same account and exact amount, but the date is off by a couple of days. This is normal — banks sometimes take a day or two to process something after your books already recorded it.
+Tier 3 — the description gives it away. The amount matches exactly, the date is way off, but the text/reference on both sides clearly talks about the same thing (like an invoice number appearing in both).
+Tier 4 — close enough on amount. The account and date line up, but the amount is off by a small amount — usually because of a bank fee or rounding.
+
+The engine always tries Tier 1 first. Only if Tier 1 comes up empty does it try Tier 2, and so on. This way, it never settles for a "probably right" match when a "definitely right" match was available.
+
+Why does "ambiguity" happen at all?
+
+Sometimes, more than one item in the cache box looks equally correct for the same bank entry. Imagine you're doing that lost-and-found matching, and three people all lost an identical black umbrella on the same day. Whoever hands you a black umbrella claim — which of the three do you give it to? You genuinely can't tell just from "black umbrella, same day."
+
+That's exactly what happens when your company pays the same amount, on the same date, more than once — for example, several standing payments of the same recurring value. The engine finds several cache entries that are all equally valid matches by the numbers alone, and has to pick one. That's what we mean by an ambiguous match — not a wrong match necessarily, just a case where the engine had to guess between look-alikes.
+
+How the engine breaks the tie
+
+When faced with several look-alike candidates, the engine now uses a smarter method than just guessing:
+
+First, it checks the description/reference text. If the bank entry says something like "Invoice #4521" and one of the candidate cashbook entries also mentions "Invoice #4521," that's real evidence — pick that one. This is like the umbrella having a name tag; if only one of the three matches the tag, the mystery is solved.
+If there's no useful text to compare (both sides are blank or unhelpful), it falls back to picking whichever candidate has the closest date, and if that's still tied, the closest amount.
+
+Every time this tie-breaking happens, the engine writes down which method it actually used to decide — so later you can tell the difference between "I'm confident because the description matched" versus "I just picked the closest date because I had nothing better to go on."
+
+Why any of this matters for your results
+
+When you ran the engine on your real data:
+
+The vast majority of transactions found a clean, exact Tier 1 match — which is a good sign that your data is generally clean.
+But roughly a third of your matches were "ambiguous" — meaning the engine had several look-alike candidates and had to pick one, often because the same payment amount happens repeatedly in your data.
+The fix makes the engine use the description/reference text to break these ties intelligently instead of guessing — but only where that text actually exists and is useful. Where it doesn't exist, the ambiguity is still real, and worth a human glancing at those specific cases, because the engine genuinely can't know for certain which twin is correct.

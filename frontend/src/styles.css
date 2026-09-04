@@ -1,0 +1,146 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ══════════════════════════════════════════════════════════
+   Zero radius globally — instrument-grade, not consumer-app
+   ══════════════════════════════════════════════════════════ */
+*, *::before, *::after {
+  border-radius: 0 !important;
+}
+
+/* ══════════════════════════════════════════════════════════
+   Light theme (default class on html)
+   ══════════════════════════════════════════════════════════ */
+html.light {
+  --bg-canvas: #EEF0F2;
+  --bg-surface: #FFFFFF;
+  --bg-surface-sunken: #F5F6F8;
+  --border-default: #D3D8DD;
+  --border-strong: #AEB6BE;
+  --text-primary: #14181D;
+  --text-secondary: #5B6570;
+  --accent-action: #1B4B8F;
+  --accent-action-hover: #164078;
+  --tier-1: #1B4B8F;
+  --tier-2: #3E76B0;
+  --tier-3: #6FA0C9;
+  --tier-4: #A9C4DE;
+  --status-amber: #9A6A15;
+  --status-amber-bg: rgba(154, 106, 21, 0.08);
+  --status-red: #A3312A;
+  --status-red-bg: rgba(163, 49, 42, 0.08);
+  --status-green: #2C7A4B;
+  --status-green-bg: rgba(44, 122, 75, 0.08);
+  --scrollbar-track: #EEF0F2;
+  --scrollbar-thumb: #D3D8DD;
+  --scrollbar-thumb-hover: #AEB6BE;
+}
+
+/* ══════════════════════════════════════════════════════════
+   Dark theme
+   ══════════════════════════════════════════════════════════ */
+html.dark {
+  --bg-canvas: #14171B;
+  --bg-surface: #1B1F24;
+  --bg-surface-sunken: #20252B;
+  --border-default: #2C333A;
+  --border-strong: #4A5560;
+  --text-primary: #E7EAED;
+  --text-secondary: #9AA5B1;
+  --accent-action: #6C9FDB;
+  --accent-action-hover: #85B3E5;
+  --tier-1: #6C9FDB;
+  --tier-2: #5588BF;
+  --tier-3: #3F6C93;
+  --tier-4: #2E4E68;
+  --status-amber: #C99A3F;
+  --status-amber-bg: rgba(201, 154, 63, 0.1);
+  --status-red: #C4534B;
+  --status-red-bg: rgba(196, 83, 75, 0.1);
+  --status-green: #4E9E71;
+  --status-green-bg: rgba(78, 158, 113, 0.1);
+  --scrollbar-track: #14171B;
+  --scrollbar-thumb: #2C333A;
+  --scrollbar-thumb-hover: #4A5560;
+}
+
+/* ══════════════════════════════════════════════════════════
+   Base styles
+   ══════════════════════════════════════════════════════════ */
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* ── Monospace: tabular figures for financial data ── */
+.font-mono {
+  font-family: 'IBM Plex Mono', 'Consolas', 'Monaco', monospace;
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+/* ── Custom scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ── Text selection ── */
+html.light ::selection {
+  background: rgba(27, 75, 143, 0.15);
+  color: #14181D;
+}
+
+html.dark ::selection {
+  background: rgba(108, 159, 219, 0.2);
+  color: #E7EAED;
+}
+
+/* ── Focus ring ── */
+*:focus-visible {
+  outline: 2px solid var(--accent-action);
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--border-strong) !important;
+}
+
+/* ── Caret ── */
+input, select, textarea {
+  caret-color: var(--accent-action);
+}
+
+/* ── Table gridlines ── */
+table {
+  border-collapse: collapse;
+}
+
+th, td {
+  border: 1px solid var(--border-default);
+}

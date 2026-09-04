@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-03T12:15:00.000Z",
+  "title": "Design System: Vanguard Ledger",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Cyanide Luminous Blue",
+        "canonical": "#00D2FF",
+        "tonalRamp": ["#002B33", "#005566", "#008099", "#00AACC", "#00D2FF", "#38E1FF", "#70ECFF", "#B8F6FF"]
+      },
+      "secondary": {
+        "role": "secondary",
+        "displayName": "Deep Indigo",
+        "canonical": "#6366F1",
+        "tonalRamp": ["#191A40", "#2E3073", "#4548A6", "#5C5FD9", "#6366F1", "#818CF8", "#A5B4FC", "#C7D2FE"]
+      },
+      "bg-app": {
+        "role": "neutral",
+        "displayName": "Deep Obsidian Base",
+        "canonical": "#0B0E14",
+        "tonalRamp": ["#040507", "#0B0E14", "#151B26", "#1C2333", "#232D3F", "#2E3B52", "#64748B", "#F1F5F9"]
+      },
+      "status-matched": {
+        "role": "semantic",
+        "displayName": "Matched Emerald",
+        "canonical": "#10B981",
+        "tonalRamp": ["#022C22", "#064E3B", "#065F46", "#047857", "#059669", "#10B981", "#34D399", "#6EE7B7"]
+      },
+      "status-exception": {
+        "role": "semantic",
+        "displayName": "Exception Rose",
+        "canonical": "#F43F5E",
+        "tonalRamp": ["#4C0519", "#881337", "#9F1239", "#BE123C", "#E11D48", "#F43F5E", "#FB7185", "#FDA4AF"]
+      },
+      "status-ambiguous": {
+        "role": "semantic",
+        "displayName": "Ambiguous Amber",
+        "canonical": "#F59E0B",
+        "tonalRamp": ["#451A03", "#78350F", "#92400E", "#B45309", "#D97706", "#F59E0B", "#FBBF24", "#FCD34D"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Page titles and primary settlement rate metrics." },
+      "headline": { "displayName": "Headline", "purpose": "Section and drawer headers." },
+      "body": { "displayName": "Body", "purpose": "Operational text and audit notes." },
+      "mono": { "displayName": "Financial Monospace", "purpose": "Tabular decimal currency figures, txn IDs, dates, and control totals." }
+    },
+    "shadows": [
+      { "name": "primary-glow", "value": "0 0 16px rgba(0, 210, 255, 0.25)", "purpose": "Luminous hover feedback on primary action triggers." },
+      { "name": "card-rest", "value": "0 10px 15px -3px rgba(0, 0, 0, 0.3)", "purpose": "Subtle elevation for ledger and metric cards." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Default easing for table row hover and drawer transitions." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Action CTA",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "High-priority execution button (e.g., Run Waterfall Reconciliation).",
+      "html": "<button class=\"ds-btn-primary\"><span>⚡</span><span>RUN RECONCILIATION</span></button>",
+      "css": ".ds-btn-primary { background: linear-gradient(90deg, #00D2FF, #38E1FF); color: #000000; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 700; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(0, 210, 255, 0.2); transition: all 0.15s ease; } .ds-btn-primary:hover { filter: brightness(1.1); box-shadow: 0 0 20px rgba(0, 210, 255, 0.35); transform: translateY(-1px); }"
+    },
+    {
+      "name": "Status Pill (Matched)",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "High-contrast indicator for verified auto-matched transactions.",
+      "html": "<span class=\"ds-pill-matched\"><span class=\"ds-dot-matched\"></span>TIER_1_EXACT</span>",
+      "css": ".ds-pill-matched { background: rgba(6, 78, 59, 0.6); color: #10B981; border: 1px solid rgba(5, 150, 105, 0.6); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 6px; } .ds-dot-matched { width: 6px; height: 6px; border-radius: 50%; background: #10B981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); }"
+    },
+    {
+      "name": "Status Pill (Exception)",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "Indicator for quarantined files or statement breaks.",
+      "html": "<span class=\"ds-pill-exception\"><span class=\"ds-dot-exception\"></span>QUARANTINED</span>",
+      "css": ".ds-pill-exception { background: rgba(76, 5, 25, 0.6); color: #F43F5E; border: 1px solid rgba(225, 29, 72, 0.6); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 6px; } .ds-dot-exception { width: 6px; height: 6px; border-radius: 50%; background: #F43F5E; box-shadow: 0 0 8px rgba(244, 63, 94, 0.6); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Obsidian Bloomberg Workbench",
+    "overview": "Vanguard Ledger is built for enterprise treasury and financial operations teams who execute high-volume multi-bank reconciliations under strict close deadlines. The interface treats raw financial data as the primary design material: zero decorative fluff, authoritative dark obsidian surfaces, and high-contrast luminous semantic beacons that enable instant break triage.",
+    "keyCharacteristics": [
+      "Obsidian Dark Canvas (#0B0E14 base)",
+      "Strict Semantic Differentiation (Emerald, Rose, Amber, Sky, Purple)",
+      "Monospace Financial Geometry with Tabular Numerals",
+      "Defensive Pre-Flight Verification Visuals"
+    ],
+    "rules": [
+      {
+        "name": "The Strict Semantic Exclusivity Rule",
+        "body": "Semantic status colors (Emerald, Rose, Amber) are strictly prohibited on decorative or non-status elements. Color in Vanguard Ledger always communicates financial truth.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Number Invariant",
+        "body": "All numerical, currency, date, and identifier values must be rendered in font-mono with font-feature-settings: 'tnum' 1, 'zero' 1; and right-aligned in tables to guarantee vertical decimal alignment.",
+        "section": "typography"
+      },
+      {
+        "name": "The Hairline Boundary Rule",
+        "body": "Depth is established by 1px border contrast (var(--border-subtle) / var(--border-muted)), not ambient blur. Surfaces remain flat at rest and respond only to state transitions.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do format every currency amount with monospace tabular figures (font-mono text-right).",
+      "Do preserve 1px hairline structural borders on all card containers and table headers.",
+      "Do display transaction identifiers without truncation on copy or hover tooltip.",
+      "Do use strict semantic badge colors (Emerald = Matched, Rose = Break, Amber = Ambiguous)."
+    ],
+    "donts": [
+      "Don't use warm cream backgrounds, serif fonts, or playful decorative illustrations.",
+      "Don't left-align currency figures or numerical data columns.",
+      "Don't hide critical exception reasons behind nested modal dialogs when inline inspection is possible.",
+      "Don't apply the primary Cyanide blue accent to passive, non-interactive surfaces."
+    ]
+  }
+}
+
