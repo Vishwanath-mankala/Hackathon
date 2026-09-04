@@ -1,3 +1,0 @@
-external_txn_id,account,currency,amount,debit_credit,booking_date,value_date,reference,narrative
-TXN-001,ACC#00001,USD,1000.00,DR,2023-04-10,2023-04-10,INV-9901,Vendor settlement payment
-TXN-002,ACC#00001,USD,250.50,CR,2023-04-11,2023-04-11,DEP-1200,Client wire deposit
