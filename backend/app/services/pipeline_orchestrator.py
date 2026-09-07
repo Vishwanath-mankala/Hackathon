@@ -99,7 +99,8 @@ class PipelineOrchestrator:
             valid_records_count=len(df),
             created_at=now_str,
             updated_at=now_str,
-            time_estimate=time_est
+            time_estimate=time_est,
+            batch_file_path=str(stored_path)
         )
 
         self.batches[batch_id] = record
@@ -131,9 +132,11 @@ class PipelineOrchestrator:
         batch.stage = "GATE_PASSED"
 
         # Stage [3] & [4] & [5a]: Row-level Rules, Anomaly Scoring, Auto-remediation
-        clean_df, anomalies = agentic_anomaly_service.evaluate_batch(df, batch_id)
+        clean_df, anomalies, candidate_file = agentic_anomaly_service.evaluate_batch(df, batch_id, stored_path)
         self.batch_dfs[batch_id] = clean_df
         self.batch_anomalies[batch_id] = anomalies
+        if candidate_file:
+            batch.anomaly_file_path = str(candidate_file)
 
         auto_remediated = [a for a in anomalies if a.status == "AUTO_REMEDIATED"]
         escalated = [a for a in anomalies if a.status == "ESCALATED"]
@@ -415,6 +418,72 @@ class PipelineOrchestrator:
 
         batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         return batch
+
+    def trigger_agent_classification(
+        self,
+        batch_id: str,
+        use_anomalies_file: bool = True,
+        agent_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Submits either the candidate anomaly CSV (if available) or the raw batch statement CSV
+        to the external Aava AI Agent (default ID 7723 or specified agent_id) via multipart/form-data.
+        Records the agent execution job info on the batch.
+        """
+        if batch_id not in self.batches:
+            raise KeyError(f"Batch '{batch_id}' not found.")
+
+        batch = self.batches[batch_id]
+
+        target_path: Optional[Path] = None
+        if use_anomalies_file and batch.anomaly_file_path:
+            p = Path(batch.anomaly_file_path)
+            if p.exists():
+                target_path = p
+
+        if not target_path and batch.batch_file_path:
+            p = Path(batch.batch_file_path)
+            if p.exists():
+                target_path = p
+
+        if not target_path:
+            # Fallback to output batches directory
+            candidate_p = settings.batches_dir / f"{batch.filename}"
+            if candidate_p.exists():
+                target_path = candidate_p
+
+        if not target_path or not target_path.exists():
+            raise FileNotFoundError(f"No statement or anomaly candidate file found on disk for batch '{batch_id}'.")
+
+        result = agentic_anomaly_service.agent_bridge.submit_batch_to_agent(target_path, agent_id=agent_id)
+        batch.agent_execution = result
+        batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        return result
+
+    def get_batch_agent_output(self, batch_id: str) -> Dict[str, Any]:
+        """
+        Fetches the execution output from Aava AI using the batch's agent_execution_id.
+        """
+        if batch_id not in self.batches:
+            raise KeyError(f"Batch '{batch_id}' not found.")
+
+        batch = self.batches[batch_id]
+        if not batch.agent_execution or not batch.agent_execution.get("agent_execution_id"):
+            return {
+                "success": False,
+                "message": f"No agent execution submitted yet for batch '{batch_id}'.",
+                "batch_id": batch_id
+            }
+
+        exec_id = batch.agent_execution["agent_execution_id"]
+        output_data = agentic_anomaly_service.agent_bridge.get_agent_execution_output(exec_id)
+
+        # Store latest output on the batch record
+        if output_data.get("success"):
+            batch.agent_execution["output_details"] = output_data
+            batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        return output_data
 
     def get_overview(self) -> PipelineOverview:
         b_list = list(self.batches.values())

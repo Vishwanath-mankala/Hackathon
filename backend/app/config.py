@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     cache_path: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "cache_gl_cashbook.csv"
     results_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "recon_results"
     quarantine_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "recon_results" / "quarantined_batches"
+    anomalies_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "anomalies"
+    ingestion_storage_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "ingestion_storage"
 
     # Server Settings
     host: str = "0.0.0.0"
@@ -34,17 +36,29 @@ class Settings(BaseSettings):
     # =========================================================================
     # Agent Platform Integration (CrewAI / Multi-Agent API)
     # =========================================================================
-    crewai_enabled: bool = False
-    crewai_api_url: Optional[str] = None  # e.g. "http://localhost:8001/api/crew/anomaly-detection"
+    crewai_enabled: bool = True
+    crewai_api_url: str = "https://int-ai.aava.ai/agents/execute/agent-executions"
+    crewai_retrieval_url: str = "https://int-ai.aava.ai/agents/execute/history/execution"
     crewai_api_key: Optional[str] = None
-    crewai_timeout_seconds: float = 30.0
+    crewai_agent_id: str = "56800"
+
+    # Multi-Agent Specialized Role IDs
+    crewai_agent_anomaly_id: str = "56800"      # Stage 4 Anomaly Classification & Risk Scoring
+    crewai_agent_sla_id: str = "55551"          # Stage 5 SLA Analysis & Urgency Classification
+    crewai_agent_recon_id: str = "56797"        # Stage 6 Reconciliation & Exception Verification
+    crewai_agent_extraction_id: str = "56231"   # Stage 2 Ingestion & Financial Statement Data Extraction
+    crewai_agent_collab_id: str = "7723"        # Frontend Architecture Collab Agent
+
+    crewai_workflow_id: Optional[str] = "reconciliation-multiagent-flow"
+    crewai_timeout_seconds: float = 60.0
 
     model_config = {
-        "env_file": ".env",
+        "env_file": (PROJECT_ROOT / ".env", Path(__file__).resolve().parents[1] / ".env", ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
 
 
 settings = Settings()
-
+settings.anomalies_dir.mkdir(parents=True, exist_ok=True)
+settings.ingestion_storage_dir.mkdir(parents=True, exist_ok=True)

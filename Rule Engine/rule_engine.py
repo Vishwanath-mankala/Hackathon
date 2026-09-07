@@ -231,7 +231,6 @@ class RuleEngine:
             return False
 
         for tier_name, tier_fn in TIERS:
-            candidates = [c for c in self.cache if tier_fn(c, ingest_row, self.cfg)]
             candidates = [c for c in account_cache if tier_fn(c, ingest_row, self.cfg)]
             if not candidates:
                 continue

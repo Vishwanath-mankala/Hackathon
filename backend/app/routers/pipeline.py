@@ -5,6 +5,7 @@ Time Estimation, GL Matching, and Publishing endpoints.
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from app.models.pipeline_models import (
     BatchRecord,
@@ -233,6 +234,128 @@ def get_published_events(limit: int = Query(50, ge=1, le=200)):
     return publish_service.get_events(limit)
 
 
+@router.get("/batches/{batch_id}/file")
+def download_batch_file(batch_id: str):
+    """Downloads the original ingested batch statement CSV."""
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    batch = pipeline_orchestrator.batches[batch_id]
+
+    file_path: Optional[Path] = None
+    if batch.batch_file_path:
+        p = Path(batch.batch_file_path)
+        if p.exists():
+            file_path = p
+
+    if not file_path:
+        p = settings.batches_dir / batch.filename
+        if p.exists():
+            file_path = p
+
+    if not file_path or not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Statement file for batch '{batch_id}' not found on server.")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=batch.filename,
+        media_type="text/csv"
+    )
+
+
+@router.get("/batches/{batch_id}/anomalies/file")
+def download_anomaly_candidates_file(batch_id: str):
+    """Downloads the Stage 3 rule engine candidate anomalies CSV file."""
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    batch = pipeline_orchestrator.batches[batch_id]
+
+    file_path: Optional[Path] = None
+    if batch.anomaly_file_path:
+        p = Path(batch.anomaly_file_path)
+        if p.exists():
+            file_path = p
+
+    if not file_path:
+        p = settings.anomalies_dir / f"{batch_id}_candidates.csv"
+        if p.exists():
+            file_path = p
+
+    if not file_path or not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"No candidate anomalies file found for batch '{batch_id}'.")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=f"{batch_id}_anomaly_candidates.csv",
+        media_type="text/csv"
+    )
+
+
+@router.post("/batches/{batch_id}/agent/classify")
+def trigger_agent_classification(
+    batch_id: str,
+    use_anomalies_file: bool = Query(True, description="Submit filtered anomaly candidate CSV if true, else full statement"),
+    agent_id: Optional[str] = Query(None, description="Aava AI Agent ID e.g. 7723 or 56800")
+):
+    """
+    Submits statement or candidate anomalies CSV to Aava AI Agent (ID 7723 or custom agent_id)
+    for Stage 4 Structural, Semantic, Timing, Referential classification & severity scoring.
+    """
+    try:
+        res = pipeline_orchestrator.trigger_agent_classification(
+            batch_id=batch_id,
+            use_anomalies_file=use_anomalies_file,
+            agent_id=agent_id
+        )
+        return res
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent trigger failed: {str(e)}")
+
+
+@router.get("/batches/{batch_id}/agent/status")
+def get_batch_agent_status(batch_id: str):
+    """Retrieves external agent execution metadata and submission status for this batch."""
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    batch = pipeline_orchestrator.batches[batch_id]
+    return {
+        "batch_id": batch_id,
+        "agent_execution": batch.agent_execution,
+        "has_anomaly_file": bool(batch.anomaly_file_path and Path(batch.anomaly_file_path).exists()),
+        "has_batch_file": bool(batch.batch_file_path and Path(batch.batch_file_path).exists())
+    }
+
+
+@router.get("/batches/{batch_id}/agent/output")
+def get_batch_agent_output(batch_id: str):
+    """
+    Fetches the live execution output from Aava AI history endpoint for this batch:
+    GET https://int-ai.aava.ai/agents/execute/history/execution?execution_id={execution_id}
+    """
+    try:
+        return pipeline_orchestrator.get_batch_agent_output(batch_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch agent output: {str(e)}")
+
+
+@router.get("/agent/execution/{execution_id}")
+def get_agent_execution_by_id(execution_id: str):
+    """
+    Fetches the execution output from Aava AI by arbitrary execution ID.
+    """
+    from app.services.agentic_anomaly_service import agentic_anomaly_service
+    res = agentic_anomaly_service.agent_bridge.get_agent_execution_output(execution_id)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message", "Failed to retrieve execution"))
+    return res
+
+
+
 # =============================================================================
 # Agent Platform Integration Endpoints (CrewAI / Multi-Agent Platform)
 # =============================================================================
@@ -253,5 +376,20 @@ def test_agent_connection():
     """
     from app.services.agentic_anomaly_service import agentic_anomaly_service
     return agentic_anomaly_service.agent_bridge.test_connection()
+
+
+@router.get("/agent/available-agents")
+def get_available_agents():
+    """
+    Returns the configured multi-agent team and their role assignments:
+    - Stage 4 Anomaly Classification (CREWAI_AGENT_ANOMALY_ID)
+    - Stage 5 SLA & Urgency (CREWAI_AGENT_SLA_ID)
+    - Stage 6 Exception Verification (CREWAI_AGENT_RECON_ID)
+    - Stage 2 Ingestion & Extraction (CREWAI_AGENT_EXTRACTION_ID)
+    - Workbench Collab (CREWAI_AGENT_COLLAB_ID)
+    """
+    from app.services.agentic_anomaly_service import agentic_anomaly_service
+    return agentic_anomaly_service.agent_bridge.get_configured_agents()
+
 
 

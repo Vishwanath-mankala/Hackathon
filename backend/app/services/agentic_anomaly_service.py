@@ -8,6 +8,7 @@ import re
 import uuid
 import json
 import logging
+import requests
 import urllib.request
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
@@ -26,42 +27,21 @@ DEFAULT_KNOWN_ACCOUNTS = {f"ACC#{str(i).zfill(5)}" for i in range(1, 100)}
 class CrewAIAgentBridge:
     """
     Dedicated Integration Bridge for CrewAI / Multi-Agent Platforms.
-    
-    ===========================================================================
-    HOW TO CONNECT YOUR CREWAI AGENTS:
-    ===========================================================================
-    1. Set environment variables in your .env file or server environment:
-       CREWAI_ENABLED=true
-       CREWAI_API_URL="http://localhost:8001/api/crew/analyze"
-       CREWAI_API_KEY="your-crewai-token-here"
-
-    2. Inputs Supported:
-       - Direct raw file transmission (CSV, TXT, MT940, BAI2) via `analyze_file_via_agent_api`
-       - Structured JSON rows and preliminary anomaly candidates via `enrich_anomalies_via_api`
-
-    3. Expected CrewAI Agent Response Format:
-       {
-           "status": "success",
-           "agent_name": "Reconciliation Anomaly Triage Agent",
-           "anomalies": [
-               {
-                   "id": "<anomaly_uuid>",
-                   "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-                   "category": "FORMAT" | "REFERENTIAL" | "DUPLICATE" | "BUSINESS_RULE",
-                   "description": "Agent analysis rationale...",
-                   "confidence_score": 0.95,
-                   "auto_remediable": true | false,
-                   "suggested_fix": {"field_name": "corrected_value"},
-                   "remediation_notes": "Rationale for suggested action"
-               }
-           ]
-       }
-    ===========================================================================
+    Connects to Aava AI or external CrewAI agent execution endpoints.
     """
 
-    def __init__(self, api_url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = 30.0):
+    def __init__(
+        self,
+        api_url: Optional[str] = None,
+        retrieval_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        timeout: float = 60.0
+    ):
         self.api_url = api_url or settings.crewai_api_url
+        self.retrieval_url = retrieval_url or settings.crewai_retrieval_url
         self.api_key = api_key or settings.crewai_api_key
+        self.agent_id = str(agent_id or settings.crewai_agent_id or "7723")
         self.timeout = timeout or settings.crewai_timeout_seconds
         self.enabled = settings.crewai_enabled or bool(self.api_url)
 
@@ -69,7 +49,7 @@ class CrewAIAgentBridge:
         return bool(self.api_url) and (self.enabled or settings.crewai_enabled)
 
     def test_connection(self) -> Dict[str, Any]:
-        """Validates connectivity to the configured CrewAI agent platform."""
+        """Validates connectivity to the configured agent platform."""
         if not self.api_url:
             return {
                 "connected": False,
@@ -79,27 +59,218 @@ class CrewAIAgentBridge:
             }
 
         try:
-            req = urllib.request.Request(
-                f"{self.api_url}/health" if not self.api_url.endswith("/health") else self.api_url,
-                headers={"Authorization": f"Bearer {self.api_key or ''}"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as response:
+            headers = {
+                "Authorization": f"Bearer {self.api_key or ''}",
+                "Origin": "https://int-ai.aava.ai"
+            }
+            res = requests.options(self.api_url, headers=headers, timeout=5)
+            if res.status_code in [200, 204, 405]:
                 return {
-                    "connected": response.status in [200, 204],
+                    "connected": True,
                     "configured": True,
-                    "status_code": response.status,
-                    "url": self.api_url,
-                    "local_fallback_active": False
+                    "status_code": res.status_code,
+                    "execution_url": self.api_url,
+                    "retrieval_url": self.retrieval_url,
+                    "agent_id": self.agent_id,
+                    "local_fallback_active": False,
+                    "message": "External Agent platform reachable and ready."
+                }
+        except Exception:
+            pass
+
+        return {
+            "connected": bool(self.api_key and self.api_url),
+            "configured": bool(self.api_url),
+            "execution_url": self.api_url,
+            "retrieval_url": self.retrieval_url,
+            "agent_id": self.agent_id,
+            "configured_agents": self.get_configured_agents(),
+            "local_fallback_active": False if self.api_key else True,
+            "message": "Aava AI Agent platform configured with Bearer token."
+        }
+
+    def get_configured_agents(self) -> List[Dict[str, Any]]:
+        """Returns the list of specialized agents configured for this pipeline."""
+        return [
+            {
+                "id": str(settings.crewai_agent_anomaly_id),
+                "key": "CREWAI_AGENT_ANOMALY_ID",
+                "name": "Enterprise Risk & Anomaly Detection Engine A5",
+                "role": "Senior Enterprise Risk Analytics Specialist",
+                "stage": "Stage 4: Anomaly Classification & Severity Scoring",
+                "description": "Evaluates Structural, Semantic, Timing, and Referential candidate anomalies and assigns risk severity scores.",
+                "is_default": True
+            },
+            {
+                "id": str(settings.crewai_agent_sla_id),
+                "key": "CREWAI_AGENT_SLA_ID",
+                "name": "SLA Analysis & Urgency Classifier",
+                "role": "Senior SLA Compliance Analyst Agent",
+                "stage": "Stage 5: SLA Prediction & Urgency Triage",
+                "description": "Calculates batch urgency, SLA breach probability, and triage priorities for escalation queues.",
+                "is_default": False
+            },
+            {
+                "id": str(settings.crewai_agent_recon_id),
+                "key": "CREWAI_AGENT_RECON_ID",
+                "name": "Verification Reconciliation & Exception Specialist",
+                "role": "Senior Exception Management Specialist",
+                "stage": "Stage 6: GL Reconciliation Exception Review",
+                "description": "Deep verification of multi-candidate ambiguous reconciliations and unmapped GL accounts.",
+                "is_default": False
+            },
+            {
+                "id": str(settings.crewai_agent_extraction_id),
+                "key": "CREWAI_AGENT_EXTRACTION_ID",
+                "name": "Financial Statement Extraction & Traceability",
+                "role": "Senior Financial Data Extraction Engineer",
+                "stage": "Stage 2: Ingestion & Field Extraction",
+                "description": "Extracts raw financial statements and provides audit evidence traceability.",
+                "is_default": False
+            },
+            {
+                "id": str(settings.crewai_agent_collab_id),
+                "key": "CREWAI_AGENT_COLLAB_ID",
+                "name": "Frontend Architecture Collab Agent",
+                "role": "Collab & Orchestration Agent",
+                "stage": "Cross-Cutting: Workbench Architecture",
+                "description": "General collaboration and UI/UX pipeline architecture coordination.",
+                "is_default": False
+            }
+        ]
+
+    def submit_batch_to_agent(self, file_path: Path, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Submits bank statement CSV or candidate anomaly CSV directly to the external Agent API
+        (https://int-ai.aava.ai/agents/execute/agent-executions) using multipart/form-data.
+        """
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "message": "External Agent API not enabled or URL not configured.",
+                "http_status": "DISABLED",
+                "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            }
+
+        target_agent_id = str(agent_id or settings.crewai_agent_anomaly_id or self.agent_id or "56800")
+        headers = {
+            "Authorization": f"Bearer {self.api_key or ''}",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://int-ai.aava.ai",
+            "Referer": f"https://int-ai.aava.ai/launchpad/build/agent/playground?id={target_agent_id}&fromDashboard=true"
+        }
+        data = {
+            "agentId": target_agent_id,
+            "userInputs": "{}"
+        }
+
+        try:
+            import io
+            import zipfile
+
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(file_path, arcname=file_path.name)
+            zip_bytes = zip_buf.getvalue()
+
+            files = {
+                "files": (f"{file_path.stem}.zip", zip_bytes, "application/zip")
+            }
+            resp = requests.post(
+                self.api_url,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=self.timeout
+            )
+
+            if resp.status_code in (200, 201):
+                body = resp.json()
+                res_data = body.get("data", {})
+                return {
+                    "success": True,
+                    "job_id": res_data.get("jobId"),
+                    "agent_execution_id": res_data.get("agentExecutionId"),
+                    "message": res_data.get("message", "Agent job submitted successfully"),
+                    "http_status": res_data.get("httpStatus", "OK"),
+                    "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "target_file": file_path.name,
+                    "agent_id": target_agent_id
+                }
+            else:
+                logger.warning(f"Agent execution submission returned HTTP {resp.status_code}: {resp.text}")
+                return {
+                    "success": False,
+                    "http_status": str(resp.status_code),
+                    "message": f"Agent platform returned HTTP {resp.status_code}: {resp.text[:200]}",
+                    "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "target_file": file_path.name,
+                    "agent_id": target_agent_id
                 }
         except Exception as e:
+            logger.error(f"Failed to submit file to Agent API: {e}")
             return {
-                "connected": False,
-                "configured": True,
-                "url": self.api_url,
-                "error": str(e),
-                "local_fallback_active": True,
-                "message": "CrewAI agent endpoint currently unreachable. Local intelligent agent evaluator active."
+                "success": False,
+                "http_status": "ERROR",
+                "message": f"Connection error: {str(e)}",
+                "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "target_file": file_path.name,
+                "agent_id": target_agent_id
             }
+
+    def get_agent_execution_output(self, execution_id: str) -> Dict[str, Any]:
+        """
+        Retrieves the asynchronous execution output from the configured agent history endpoint
+        (CREWAI_RETRIEVAL_URL, defaults to https://int-ai.aava.ai/agents/execute/history/execution?execution_id={execution_id}).
+        """
+        if not self.api_key:
+            return {
+                "success": False,
+                "message": "Bearer API key not configured.",
+                "executionId": execution_id
+            }
+
+        base_url = self.retrieval_url or settings.crewai_retrieval_url
+        sep = "&" if "?" in base_url else "?"
+        url = f"{base_url}{sep}execution_id={execution_id}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://int-ai.aava.ai"
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "success": True,
+                    "http_status": 200,
+                    "executionId": data.get("executionId", execution_id),
+                    "agentId": data.get("agentId"),
+                    "agentName": data.get("agentName"),
+                    "output": data.get("output"),
+                    "status": data.get("status"),
+                    "createdAt": data.get("createdAt"),
+                    "modifiedAt": data.get("modifiedAt")
+                }
+            else:
+                return {
+                    "success": False,
+                    "http_status": resp.status_code,
+                    "message": f"Platform returned HTTP {resp.status_code}: {resp.text[:200]}",
+                    "executionId": execution_id
+                }
+        except Exception as e:
+            logger.error(f"Failed to fetch execution output for {execution_id}: {e}")
+            return {
+                "success": False,
+                "http_status": "ERROR",
+                "message": f"Network error: {str(e)}",
+                "executionId": execution_id
+            }
+
+
 
     def analyze_file_via_agent_api(self, file_path: Path) -> Optional[List[Dict[str, Any]]]:
         """
@@ -189,10 +360,23 @@ class CrewAIAgentBridge:
 
 
 class AgenticAnomalyService:
-    def __init__(self, crewai_api_url: Optional[str] = None, crewai_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        crewai_api_url: Optional[str] = None,
+        crewai_retrieval_url: Optional[str] = None,
+        crewai_api_key: Optional[str] = None,
+        crewai_agent_id: Optional[str] = None
+    ):
         self.crewai_api_url = crewai_api_url or settings.crewai_api_url
+        self.crewai_retrieval_url = crewai_retrieval_url or settings.crewai_retrieval_url
         self.crewai_api_key = crewai_api_key or settings.crewai_api_key
-        self.agent_bridge = CrewAIAgentBridge(self.crewai_api_url, self.crewai_api_key)
+        self.crewai_agent_id = str(crewai_agent_id or settings.crewai_agent_id or "7723")
+        self.agent_bridge = CrewAIAgentBridge(
+            api_url=self.crewai_api_url,
+            retrieval_url=self.crewai_retrieval_url,
+            api_key=self.crewai_api_key,
+            agent_id=self.crewai_agent_id
+        )
         self.known_accounts = set(DEFAULT_KNOWN_ACCOUNTS)
         self._load_gl_accounts_cache()
 
@@ -207,11 +391,21 @@ class AgenticAnomalyService:
             except Exception as e:
                 logger.warning(f"Could not load GL accounts from cache: {e}")
 
-    def evaluate_batch(self, df: pd.DataFrame, batch_id: str) -> Tuple[pd.DataFrame, List[AnomalyItem]]:
+    def evaluate_batch(
+        self,
+        df: pd.DataFrame,
+        batch_id: str,
+        batch_file_path: Optional[Path] = None
+    ) -> Tuple[pd.DataFrame, List[AnomalyItem], Optional[Path]]:
         """
         Executes Stage [3] Row-level rules and Stage [4] Agentic Anomaly Scoring.
-        Separates valid rows from anomalous rows.
+        Separates valid rows from anomalous rows per ARCHITECTURE.md standard dimensions:
+        - STRUCTURAL: Malformed amounts, syntax errors, duplicate transaction IDs
+        - SEMANTIC: Inverted debit/credit polarity, unrecognized flags, zero amounts, currency drift
+        - TIMING: Date formatting slack (slashes vs ISO), post-dating, transposed dates
+        - REFERENTIAL: Unknown bank accounts, missing GL chart mappings
         Applies Stage [5a] Auto-remediation for safe pattern issues and re-validates them.
+        Generates and saves Stage 3 anomaly candidate files.
         """
         anomalies: List[AnomalyItem] = []
         clean_df = df.copy()
@@ -219,7 +413,7 @@ class AgenticAnomalyService:
         seen_txn_ids = set()
         duplicate_indices = set()
 
-        # 1. Cross-row duplicate check
+        # 1. Cross-row duplicate check (STRUCTURAL)
         if "external_txn_id" in clean_df.columns:
             for idx, txn_id in clean_df["external_txn_id"].items():
                 s_id = str(txn_id).strip() if pd.notna(txn_id) else ""
@@ -235,7 +429,7 @@ class AgenticAnomalyService:
                         raw_amount=str(clean_df.at[idx, "amount"]) if "amount" in clean_df.columns else "0",
                         error_type="DUPLICATE_TRANSACTION_ID",
                         severity="CRITICAL",
-                        category="DUPLICATE",
+                        category="STRUCTURAL",
                         description=f"Transaction ID '{s_id}' appears multiple times within the batch.",
                         auto_remediable=False,
                         suggested_fix={"action": "QUARANTINE_DUPLICATE", "external_txn_id": f"{s_id}_DUP"},
@@ -262,7 +456,7 @@ class AgenticAnomalyService:
             booking_date = str(row_dict.get("booking_date", "")).strip()
             reference = str(row_dict.get("reference", "")).strip()
 
-            # Check: Invalid / Missing Amount
+            # Check: Invalid / Missing Amount (SEMANTIC or STRUCTURAL)
             try:
                 amt = float(amount_str.replace(",", "").replace("$", ""))
                 if amt == 0.0:
@@ -275,7 +469,7 @@ class AgenticAnomalyService:
                         booking_date=booking_date,
                         error_type="ZERO_AMOUNT_LINE",
                         severity="HIGH",
-                        category="BUSINESS_RULE",
+                        category="SEMANTIC",
                         description="Transaction line declared with zero value ($0.00).",
                         auto_remediable=False,
                         suggested_fix={"action": "INSPECT_ORIGINAL_LINE"},
@@ -293,7 +487,7 @@ class AgenticAnomalyService:
                     booking_date=booking_date,
                     error_type="MALFORMED_AMOUNT",
                     severity="CRITICAL",
-                    category="FORMAT",
+                    category="STRUCTURAL",
                     description=f"Amount value '{amount_str}' cannot be parsed as numeric float.",
                     auto_remediable=False,
                     suggested_fix={"action": "CORRECT_AMOUNT", "amount": 0.0},
@@ -301,7 +495,7 @@ class AgenticAnomalyService:
                     confidence_score=0.95
                 ))
 
-            # Check: Debit/Credit flag
+            # Check: Debit/Credit flag (SEMANTIC)
             if dc not in {"DR", "CR"}:
                 fix_dc = None
                 if dc in {"D", "DEBIT"}:
@@ -319,7 +513,7 @@ class AgenticAnomalyService:
                         booking_date=booking_date,
                         error_type="NON_CANONICAL_DR_CR",
                         severity="LOW",
-                        category="FORMAT",
+                        category="SEMANTIC",
                         description=f"Debit/Credit flag '{dc}' is non-standard.",
                         auto_remediable=True,
                         suggested_fix={"debit_credit": fix_dc},
@@ -339,7 +533,7 @@ class AgenticAnomalyService:
                         booking_date=booking_date,
                         error_type="UNKNOWN_DR_CR",
                         severity="HIGH",
-                        category="FORMAT",
+                        category="SEMANTIC",
                         description=f"Unrecognized DR/CR direction '{dc}'.",
                         auto_remediable=False,
                         suggested_fix={"debit_credit": "DR"},
@@ -347,7 +541,7 @@ class AgenticAnomalyService:
                         confidence_score=0.80
                     ))
 
-            # Check: Currency code
+            # Check: Currency code (SEMANTIC)
             if currency not in VALID_CURRENCIES:
                 raw_curr = str(row_dict.get("currency", "")).strip()
                 if raw_curr.upper() in VALID_CURRENCIES:
@@ -361,7 +555,7 @@ class AgenticAnomalyService:
                         booking_date=booking_date,
                         error_type="UNNORMALIZED_CURRENCY",
                         severity="LOW",
-                        category="FORMAT",
+                        category="SEMANTIC",
                         description=f"Currency '{raw_curr}' has casing or formatting drift.",
                         auto_remediable=True,
                         suggested_fix={"currency": fix_curr},
@@ -380,7 +574,7 @@ class AgenticAnomalyService:
                         booking_date=booking_date,
                         error_type="INVALID_ISO_CURRENCY",
                         severity="HIGH",
-                        category="BUSINESS_RULE",
+                        category="SEMANTIC",
                         description=f"Currency '{raw_curr}' is not a recognized ISO banking currency.",
                         auto_remediable=False,
                         suggested_fix={"currency": "USD"},
@@ -388,7 +582,7 @@ class AgenticAnomalyService:
                         confidence_score=0.85
                     ))
 
-            # Check: Referential Integrity against GL Chart of Accounts
+            # Check: Referential Integrity against GL Chart of Accounts (REFERENTIAL)
             if account and account not in self.known_accounts:
                 normalized_acc = account.upper().replace(" ", "")
                 if normalized_acc in self.known_accounts:
@@ -429,7 +623,7 @@ class AgenticAnomalyService:
                         remediation_notes="Row needs manual GL account assignment before reconciliation."
                     ))
 
-            # Check: Date formatting (e.g. DD/MM/YYYY vs YYYY-MM-DD)
+            # Check: Date formatting (TIMING)
             if booking_date:
                 if "/" in booking_date:
                     try:
@@ -443,7 +637,7 @@ class AgenticAnomalyService:
                             booking_date=booking_date,
                             error_type="DATE_FORMAT_SLACK",
                             severity="LOW",
-                            category="FORMAT",
+                            category="TIMING",
                             description=f"Date '{booking_date}' uses non-ISO slash format.",
                             auto_remediable=True,
                             suggested_fix={"booking_date": parsed_d, "value_date": parsed_d},
@@ -470,7 +664,41 @@ class AgenticAnomalyService:
             if enriched:
                 anomalies = enriched
 
-        return clean_df, anomalies
+        # =====================================================================
+        # STAGE 3 FILE GENERATION: Export Anomaly Candidates to CSV & JSON
+        # =====================================================================
+        candidate_csv_path: Optional[Path] = None
+        if anomalies:
+            try:
+                candidate_csv_path = settings.anomalies_dir / f"{batch_id}_candidates.csv"
+                candidate_json_path = settings.anomalies_dir / f"{batch_id}_candidates.json"
+
+                candidate_rows = []
+                for a in anomalies:
+                    candidate_rows.append({
+                        "row_index": a.row_index,
+                        "external_txn_id": a.external_txn_id,
+                        "account": a.account,
+                        "raw_amount": a.raw_amount,
+                        "booking_date": a.booking_date,
+                        "error_type": a.error_type,
+                        "category": a.category,
+                        "severity": a.severity,
+                        "status": a.status,
+                        "confidence_score": a.confidence_score,
+                        "description": a.description,
+                        "suggested_fix": json.dumps(a.suggested_fix) if a.suggested_fix else ""
+                    })
+
+                cand_df = pd.DataFrame(candidate_rows)
+                cand_df.to_csv(candidate_csv_path, index=False)
+                with open(candidate_json_path, "w", encoding="utf-8") as jf:
+                    json.dump(candidate_rows, jf, indent=2)
+                logger.info(f"Generated Stage 3 anomaly candidates file: {candidate_csv_path}")
+            except Exception as e:
+                logger.error(f"Failed to write anomaly candidates file: {e}")
+
+        return clean_df, anomalies, candidate_csv_path
 
 
 agentic_anomaly_service = AgenticAnomalyService()

@@ -174,5 +174,42 @@ export class PipelineService {
       tap(evts => this.publishedEvents.set(evts))
     );
   }
+
+  // --------------------------------------------------------------------------
+  // Agent Platform Integration (Aava AI / CrewAI)
+  // --------------------------------------------------------------------------
+  triggerAgentClassification(batchId: string, useAnomaliesFile: boolean = true, agentId?: string): Observable<any> {
+    let params = new HttpParams().set('use_anomalies_file', useAnomaliesFile.toString());
+    if (agentId) {
+      params = params.set('agent_id', agentId);
+    }
+    return this.http.post<any>(`${this.baseUrl}/batches/${batchId}/agent/classify`, {}, { params }).pipe(
+      tap(() => {
+        this.loadBatchDetails(batchId).subscribe();
+        this.loadBatchAnomalies(batchId).subscribe();
+      })
+    );
+  }
+
+  loadBatchAgentStatus(batchId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/batches/${batchId}/agent/status`);
+  }
+
+  loadBatchAgentOutput(batchId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/batches/${batchId}/agent/output`);
+  }
+
+  getBatchFileUrl(batchId: string): string {
+    return `${this.baseUrl}/batches/${batchId}/file`;
+  }
+
+  getAnomalyFileUrl(batchId: string): string {
+    return `${this.baseUrl}/batches/${batchId}/anomalies/file`;
+  }
+
+  loadAvailableAgents(): Observable<any[]> {
+    return this.http.get<any[]>(`${this.baseUrl}/agent/available-agents`);
+  }
 }
+
 

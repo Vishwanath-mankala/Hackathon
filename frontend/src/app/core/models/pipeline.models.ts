@@ -31,7 +31,7 @@ export interface AnomalyItem {
   booking_date?: string | null;
   error_type: string;
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  category: 'ENCODING' | 'FORMAT' | 'REFERENTIAL' | 'DUPLICATE' | 'SEQUENCE_GAP' | 'BUSINESS_RULE';
+  category: 'STRUCTURAL' | 'SEMANTIC' | 'TIMING' | 'REFERENTIAL' | 'FORMAT' | 'DUPLICATE' | 'BUSINESS_RULE' | string;
   description: string;
   auto_remediable: boolean;
   suggested_fix?: Record<string, any> | null;
@@ -110,6 +110,9 @@ export interface BatchRecord {
   gl_summary?: GLMatchSummary | null;
   published: boolean;
   publish_event?: PublishEvent | null;
+  batch_file_path?: string | null;
+  anomaly_file_path?: string | null;
+  agent_execution?: any;
 }
 
 export interface IngestionResponse {

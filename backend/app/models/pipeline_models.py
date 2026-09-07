@@ -34,8 +34,8 @@ class AnomalyItem(BaseModel):
     raw_amount: Optional[str] = None
     booking_date: Optional[str] = None
     error_type: str
-    severity: str = "MEDIUM"  # LOW, MEDIUM, HIGH, CRITICAL
-    category: str = "FORMAT"  # ENCODING, FORMAT, REFERENTIAL, DUPLICATE, SEQUENCE_GAP, BUSINESS_RULE
+    severity: str = "MEDIUM"  # CRITICAL, HIGH, MEDIUM, LOW
+    category: str = "STRUCTURAL"  # STRUCTURAL, SEMANTIC, TIMING, REFERENTIAL (ARCHITECTURE.md Stage 4)
     description: str
     auto_remediable: bool = False
     suggested_fix: Optional[Dict[str, Any]] = None
@@ -114,6 +114,20 @@ class BatchRecord(BaseModel):
     gl_summary: Optional[GLMatchSummary] = None
     published: bool = False
     publish_event: Optional[PublishEvent] = None
+    batch_file_path: Optional[str] = None
+    anomaly_file_path: Optional[str] = None
+    agent_execution: Optional[Dict[str, Any]] = None
+
+
+class AgentExecutionResponse(BaseModel):
+    batch_id: str
+    job_id: Optional[int] = None
+    agent_execution_id: Optional[str] = None
+    message: str
+    http_status: str = "OK"
+    success: bool = True
+    submitted_at: str
+    target_file: Optional[str] = None
 
 
 class IngestionResponse(BaseModel):
