@@ -9,10 +9,6 @@ import { ThemeService } from '../../core/services/theme.service';
   imports: [CommonModule, RouterLink, RouterLinkActive],
   template: `
     <nav class="w-14 bg-surface border-r border-border-default flex flex-col items-center h-screen shrink-0 select-none">
-      <!-- Brand mark -->
-      <div class="h-12 flex items-center justify-center border-b border-border-default w-full">
-        <span class="font-mono text-[11px] font-semibold text-accent-action">VL</span>
-      </div>
 
       <!-- Navigation links -->
       <div class="flex-1 flex flex-col items-center gap-1 py-3 w-full">
