@@ -12,7 +12,7 @@ services:
     name: recon-api
     runtime: python
     rootDir: backend
-    plan: starter            # a persistent disk needs a paid instance; see disk below
+    plan: free            # a persistent disk needs a paid instance; see disk below
     buildCommand: pip install -r requirements.txt
     # One worker, no --reload: the batch registry, orchestrator and run history
     # are an in-memory cache over the SQLite file on the disk.
