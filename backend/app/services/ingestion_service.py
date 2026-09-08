@@ -12,17 +12,19 @@ from typing import Tuple, Dict, Any, Optional
 
 from app.config import settings
 
-INCOMING_SFTP_DIR = settings.project_root / "incoming_sftp"
-INGESTION_STORAGE_DIR = settings.project_root / "data" / "ingestion_storage"
-
-INCOMING_SFTP_DIR.mkdir(parents=True, exist_ok=True)
-INGESTION_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-
 
 class IngestionService:
-    def __init__(self):
-        self.storage_dir = INGESTION_STORAGE_DIR
-        self.sftp_dir = INCOMING_SFTP_DIR
+    """Directories come from settings so a deployment can point them at a mounted volume."""
+
+    @property
+    def storage_dir(self) -> Path:
+        settings.ingestion_storage_dir.mkdir(parents=True, exist_ok=True)
+        return settings.ingestion_storage_dir
+
+    @property
+    def sftp_dir(self) -> Path:
+        settings.sftp_dir.mkdir(parents=True, exist_ok=True)
+        return settings.sftp_dir
 
     def list_sftp_files(self):
         """Lists files pending in the simulated SFTP arrival directory."""

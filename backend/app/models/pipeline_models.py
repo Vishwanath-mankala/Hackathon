@@ -246,8 +246,12 @@ class BatchRecord(BaseModel):
     batch_id: str
     filename: str
     file_size_bytes: int
-    source: str = "SFTP"  # SFTP, UPLOAD, MANUAL_TRIGGER
-    stage: str = "RECEIVED"  # RECEIVED, INGESTED, GATE_CHECK, GATE_QUARANTINED, RULE_ENGINE, ANOMALY_EVAL, REMEDIATION, RECONCILING, COMPLETED, PUBLISHED
+    source: str = "SFTP"  # SFTP, UPLOAD, SAMPLE_FEED, MANUAL_TRIGGER
+    # INGESTED, GATE_PASSED, GATE_QUARANTINED, RULE_VALIDATED, ESCALATED_FOR_REVIEW,
+    # RECONCILED, PUBLISHED; FAILED (pipeline raised), INTERRUPTED (process
+    # restarted mid-pipeline — never silently dropped or requeued).
+    stage: str = "RECEIVED"
+    failure_reason: Optional[str] = None
     gate_passed: Optional[bool] = None
     total_records: int = 0
     valid_records_count: int = 0
@@ -315,6 +319,45 @@ class IngestionResponse(BaseModel):
     gate_passed: bool
     quarantined: bool
     time_estimate: Optional[TimeEstimate] = None
+    queue_remaining: Optional[int] = None   # sample-feed pulls only
+
+
+class FeedQueueEntry(BaseModel):
+    sequence: int
+    file: str
+    row_count: Optional[int] = None
+    declared_record_count: Optional[int] = None
+    declared_control_total: Optional[float] = None
+    min_booking_date: Optional[str] = None
+    max_booking_date: Optional[str] = None
+    status: str                      # PENDING | INGESTED | FAILED | MISSING
+    batch_id: Optional[str] = None
+    ingested_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class FeedQueueNext(BaseModel):
+    sequence: int
+    file: str
+    row_count: Optional[int] = None
+
+
+class FeedQueueStatus(BaseModel):
+    pending: int
+    ingested: int
+    failed: int
+    missing: int
+    total: int
+    next: Optional[FeedQueueNext] = None
+    recent: List[FeedQueueEntry] = Field(default_factory=list)
+    manifest: str
+
+
+class FeedResetResult(BaseModel):
+    queue: FeedQueueStatus
+    batches_cleared: int
+    gl_cache_rows: int
+    run_history_rows_kept: int
 
 
 class PipelineOverview(BaseModel):

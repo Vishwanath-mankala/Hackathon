@@ -19,6 +19,7 @@ import {
 import { AsyncStateComponent } from '../../shared/components/async-state/async-state.component';
 import { SpinnerComponent } from '../../shared/components/spinner/spinner.component';
 import { AgentReportComponent } from '../../shared/components/agent-report/agent-report.component';
+import { InfoTipComponent } from '../../shared/components/info-tip/info-tip.component';
 import { isRunning } from '../../core/agent-states';
 
 interface StageRow {
@@ -31,7 +32,7 @@ interface StageRow {
 @Component({
   selector: 'app-time-estimator',
   standalone: true,
-  imports: [CommonModule, FormsModule, AsyncStateComponent, SpinnerComponent, AgentReportComponent],
+  imports: [CommonModule, FormsModule, AsyncStateComponent, SpinnerComponent, AgentReportComponent, InfoTipComponent],
   template: `
     <div class="space-y-6 animate-fade-in">
       <!-- Section Header -->
@@ -44,7 +45,19 @@ interface StageRow {
           </p>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-3">
+          <button
+            type="button"
+            (click)="showGuide.set(!showGuide())"
+            class="text-[12px] font-medium px-2.5 py-1.5 border transition-colors"
+            [ngClass]="showGuide()
+              ? 'border-accent-action text-accent-action bg-[var(--status-green-bg)]'
+              : 'border-border-default text-text-secondary hover:text-text-primary hover:border-border-strong'"
+            [attr.aria-expanded]="showGuide()"
+            aria-controls="estimator-guide"
+          >
+            {{ showGuide() ? 'Hide guide' : 'How to read this page' }}
+          </button>
           <label class="text-[12px] text-text-secondary font-medium">Batch:</label>
           @if (batches().length > 0) {
             <select
@@ -64,6 +77,60 @@ interface StageRow {
         </div>
       </div>
 
+      <!-- Reader's guide: what each block on this page is and where its numbers come from -->
+      @if (showGuide()) {
+        <div id="estimator-guide" class="bg-surface border border-border-default p-5 text-[13px] leading-[1.5] text-text-primary space-y-4">
+          <div class="flex items-start justify-between gap-3 pb-3 border-b border-border-default">
+            <div>
+              <h2 class="text-[15px] font-medium">How to read this page</h2>
+              <p class="text-[12px] text-text-secondary">
+                Three answers to one question, "how long will this batch take?", shown side by side so each can be checked
+                against the others. Hover any <span class="inline-flex items-center justify-center w-[14px] h-[14px] border border-border-strong text-[9px] font-mono font-semibold align-middle">i</span> marker for the same explanation in place.
+              </p>
+            </div>
+            <button type="button" (click)="showGuide.set(false)" class="text-text-secondary hover:text-text-primary text-[12px] shrink-0">Close</button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="space-y-1.5">
+              <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">1 · Local estimate</div>
+              <p>
+                The pipeline's own formula. Machine time is a per-stage sum driven by file size and row count; queue wait
+                is the time escalated rows are expected to sit with an analyst. Its constants start as declared defaults and
+                switch to values measured on this machine once enough runs have completed.
+              </p>
+            </div>
+            <div class="space-y-1.5">
+              <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">2 · Agent forecast</div>
+              <p>
+                An independent prediction from the forecast agent, issued at ingest before any processing, using only
+                what is known then plus the history of comparable batches. It returns a point estimate, a p10 to p90 range
+                and a breach probability. It never blocks the pipeline; a missing or malformed reply is shown as such.
+              </p>
+            </div>
+            <div class="space-y-1.5">
+              <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">3 · Measured actual</div>
+              <p>
+                The wall-clock the batch really took, split into machine work and analyst queue wait. Both estimates are
+                scored against it as a signed error, and that score is written back to the run history so the next
+                estimate and the next forecast learn from it.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-border-default text-[12px] text-text-secondary">
+            <p>
+              <span class="text-text-primary font-medium">SLA status.</span> The estimate is compared with the batch's
+              time budget: within 80% of it is on track, up to the budget is at risk, beyond it is breached.
+            </p>
+            <p>
+              <span class="text-text-primary font-medium">Run history.</span> One row per completed batch. It is the
+              knowledge base for both the local calibration and the agent, and the place to see how accurate each has been.
+            </p>
+          </div>
+        </div>
+      }
+
       <app-async-state
         label="processing time estimate"
         skeleton="cards"
@@ -80,8 +147,9 @@ interface StageRow {
             <div class="bg-surface border border-border-default p-5 space-y-4">
               <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-border-default">
                 <div>
-                  <div class="text-[11px] font-mono text-text-secondary mb-1">
+                  <div class="text-[11px] font-mono text-text-secondary mb-1 flex items-center gap-1.5">
                     Local estimate · {{ est.batch_id }}
+                    <app-info-tip label="Local estimate" [text]="tips.localEstimate" />
                   </div>
                   <div class="flex items-baseline gap-3 flex-wrap">
                     <span class="text-[24px] font-mono font-semibold text-text-primary">
@@ -100,6 +168,7 @@ interface StageRow {
 
                 <div class="flex items-center gap-2">
                   <span class="text-[12px] text-text-secondary font-medium">SLA compliance:</span>
+                  <app-info-tip label="SLA compliance" [text]="tips.slaStatus" align="right" />
                   @if (est.sla_status === 'ON_TRACK') {
                     <span class="px-2 py-0.5 border border-status-green bg-[var(--status-green-bg)] text-status-green font-mono text-[12px] font-medium">
                       ON TRACK
@@ -121,23 +190,23 @@ interface StageRow {
 
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-[13px] font-mono">
                 <div class="p-3 bg-surface-sunken border border-border-default">
-                  <span class="text-text-secondary block text-[11px]">Calculated ETA</span>
+                  <span class="text-text-secondary block text-[11px]">Calculated ETA <app-info-tip label="Calculated ETA" [text]="tips.eta" /></span>
                   <span class="text-text-primary font-semibold text-[14px]">{{ est.eta_timestamp }}</span>
                 </div>
                 <div class="p-3 bg-surface-sunken border border-border-default">
-                  <span class="text-text-secondary block text-[11px]">Throughput used</span>
+                  <span class="text-text-secondary block text-[11px]">Throughput used <app-info-tip label="Throughput used" [text]="tips.throughput" /></span>
                   <span class="text-status-green font-semibold text-[14px]">
                     {{ est.baseline_throughput_used | number:'1.0-0' }} rec/sec
                   </span>
                 </div>
                 <div class="p-3 bg-surface-sunken border border-border-default">
-                  <span class="text-text-secondary block text-[11px]">Batch file size</span>
+                  <span class="text-text-secondary block text-[11px]">Batch file size <app-info-tip label="Batch file size" [text]="tips.fileSize" /></span>
                   <span class="text-text-primary font-semibold text-[14px]">
                     {{ est.file_size_mb }} MB ({{ est.file_size_bytes | number }} B)
                   </span>
                 </div>
                 <div class="p-3 bg-surface-sunken border border-border-default">
-                  <span class="text-text-secondary block text-[11px]">SLA target limit</span>
+                  <span class="text-text-secondary block text-[11px]">SLA target limit <app-info-tip label="SLA target limit" [text]="tips.slaTarget" align="right" /></span>
                   <span class="text-text-primary font-semibold text-[14px]">
                     {{ est.sla_target_seconds | number:'1.0-0' }}s
                   </span>
@@ -154,6 +223,7 @@ interface StageRow {
                   {{ cmp.calibration.source === 'HISTORY' ? 'Calibrated' : 'Default' }}
                 </span>
                 <span>{{ calibrationLine(cmp.calibration) }}</span>
+                <app-info-tip label="Calibration" [text]="tips.calibration" />
               </div>
             </div>
 
@@ -164,7 +234,10 @@ interface StageRow {
             <div class="bg-surface border border-border-default mt-6">
               <div class="px-4 py-3 border-b border-border-default flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
-                  <h2 class="text-[15px] font-medium text-text-primary">Forecast vs actual</h2>
+                  <h2 class="text-[15px] font-medium text-text-primary flex items-center gap-1.5">
+                    Forecast vs actual
+                    <app-info-tip label="Forecast vs actual" [text]="tips.forecastVsActual" />
+                  </h2>
                   <p class="text-[12px] text-text-secondary">
                     The agent forecast is issued at ingest, before Stage 2 runs, from this file's size and the
                     history of comparable batches. It is scored against the measured wall-clock afterwards.
@@ -188,7 +261,10 @@ interface StageRow {
               <div class="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-border-default">
                 <!-- Local estimate -->
                 <div class="p-4 space-y-2">
-                  <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">Local estimate</div>
+                  <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                    Local estimate
+                    <app-info-tip label="Local estimate column" [text]="tips.localColumn" />
+                  </div>
                   <div class="text-[22px] font-mono font-semibold text-text-primary">
                     {{ est.total_estimated_seconds | number:'1.2-2' }}s
                   </div>
@@ -219,10 +295,16 @@ interface StageRow {
                 <!-- Agent forecast -->
                 <div class="p-4 space-y-2">
                   <div class="flex items-center justify-between gap-2">
-                    <span class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">Agent forecast</span>
+                    <span class="text-[10px] font-mono uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                      Agent forecast
+                      <app-info-tip label="Agent forecast" [text]="tips.agentColumn" />
+                    </span>
                     @if (cmp.agent_forecast; as f) {
-                      <span class="px-1.5 py-0.5 border text-[10px] font-mono uppercase tracking-wider" [ngClass]="forecastStatusClass(f.status)">
-                        {{ f.status }}
+                      <span class="flex items-center gap-1.5">
+                        <span class="px-1.5 py-0.5 border text-[10px] font-mono uppercase tracking-wider" [ngClass]="forecastStatusClass(f.status)">
+                          {{ f.status }}
+                        </span>
+                        <app-info-tip label="Forecast status" [text]="tips.forecastStatus" align="right" />
                       </span>
                     }
                   </div>
@@ -312,7 +394,10 @@ interface StageRow {
 
                 <!-- Measured actual -->
                 <div class="p-4 space-y-2">
-                  <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary">Measured actual</div>
+                  <div class="text-[10px] font-mono uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                    Measured actual
+                    <app-info-tip label="Measured actual" [text]="tips.actualColumn" align="right" />
+                  </div>
                   @if (cmp.actual; as a) {
                     <div class="text-[22px] font-mono font-semibold"
                          [ngClass]="a.still_parked ? 'text-status-amber' : 'text-text-primary'">
@@ -351,7 +436,10 @@ interface StageRow {
             <!-- Component-Wise Duration Breakdown -->
             <div class="bg-surface border border-border-default mt-6">
               <div class="px-4 py-3 border-b border-border-default flex items-center justify-between">
-                <h2 class="text-[15px] font-medium text-text-primary">Pipeline stage execution breakdown</h2>
+                <h2 class="text-[15px] font-medium text-text-primary flex items-center gap-1.5">
+                  Pipeline stage execution breakdown
+                  <app-info-tip label="Stage breakdown" [text]="tips.stageBreakdown" />
+                </h2>
                 <span class="text-[12px] font-mono text-text-secondary">Declared structure; throughput and queue wait are measured</span>
               </div>
 
@@ -392,7 +480,10 @@ interface StageRow {
       <div class="bg-surface border border-border-default">
         <div class="px-4 py-3 border-b border-border-default flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
-            <h2 class="text-[15px] font-medium text-text-primary">Run history &amp; forecast accuracy</h2>
+            <h2 class="text-[15px] font-medium text-text-primary flex items-center gap-1.5">
+              Run history &amp; forecast accuracy
+              <app-info-tip label="Run history" [text]="tips.runHistory" />
+            </h2>
             <p class="text-[12px] text-text-secondary">
               One row per completed run. Signed error: positive means over-estimated.
               Rows marked calibrated are the ones the estimator derives its constants from.
@@ -431,13 +522,13 @@ interface StageRow {
                   <th class="py-2 px-3">Completed</th>
                   <th class="py-2 px-3 text-right font-mono">Rows</th>
                   <th class="py-2 px-3">Outcome</th>
-                  <th class="py-2 px-3 text-right font-mono">Local est.</th>
-                  <th class="py-2 px-3 text-right font-mono">Forecast</th>
-                  <th class="py-2 px-3 text-right font-mono">Actual</th>
-                  <th class="py-2 px-3 text-right font-mono">Queue wait</th>
-                  <th class="py-2 px-3 text-right font-mono">Local err.</th>
-                  <th class="py-2 px-3 text-right font-mono">Forecast err.</th>
-                  <th class="py-2 px-3 text-center">Calib.</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="The formula's estimate once the batch's data quality was known (anomaly and escalation counts in)">Local est.</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="The agent's point forecast issued at ingest; blank when no forecast was received">Forecast</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="Measured wall-clock from ingest to completion: machine work plus analyst queue wait">Actual</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="Time the batch sat at the analyst queue waiting on escalated rows; the main SLA risk">Queue wait</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="(local est. − actual) ÷ actual. Positive means over-estimated. Green within ±25%, amber within ±100%">Local err.</th>
+                  <th class="py-2 px-3 text-right font-mono cursor-help" title="(forecast − actual) ÷ actual, same colouring. Fed back to the agent in the next batch's history">Forecast err.</th>
+                  <th class="py-2 px-3 text-center cursor-help" title="✓ = this run is large enough to feed the estimator's throughput and queue-wait calibration">Calib.</th>
                 </tr>
               </thead>
               <tbody class="text-[12px] font-mono divide-y divide-border-default">
@@ -490,6 +581,64 @@ export class TimeEstimatorComponent implements OnInit, OnDestroy {
   loading = signal<boolean>(false);
   error = signal<string | null>(null);
   showAgentOutput = signal<boolean>(false);
+  showGuide = signal<boolean>(false);
+
+  /**
+   * Explanations behind each "i" marker. They describe what a figure means
+   * and where it comes from; the values themselves stay in the template.
+   */
+  readonly tips = {
+    localEstimate:
+      'The pipeline\'s own formula for this batch. It adds a per-stage machine-time model (parse, gate, rule engine, ' +
+      'anomaly triage, GL match) to the analyst queue wait expected for escalated rows. Constants come from the ' +
+      'declared defaults until enough runs exist to calibrate them from this machine\'s history.',
+    slaStatus:
+      'The estimate measured against the batch\'s time budget. Within 80% of the budget is ON TRACK, up to the budget ' +
+      'is AT RISK, beyond it is BREACHED. The percentage is how much of the budget the estimate would consume.',
+    eta:
+      'Ingest time plus the local estimate, expressed as a clock time. It is the earliest moment a downstream ' +
+      'consumer should expect the reconciled batch.',
+    throughput:
+      'Records per second the rule engine is modelled to process. It is the declared default until the run history ' +
+      'holds enough large runs, after which it is the throughput measured on this machine.',
+    fileSize:
+      'Size of the ingested statement. It drives the parse-stage estimate; the row count drives the rule-engine ' +
+      'and match stages.',
+    slaTarget:
+      'The end-of-day cut-off budget for one batch, from ingest to reconciled. Every status and breach probability ' +
+      'on this page is judged against it.',
+    calibration:
+      'Where the formula\'s constants came from. DEFAULT means the declared throughput and queue wait are in use. ' +
+      'CALIBRATED means they were derived from completed runs of 200 or more rows on this machine, and the residual ' +
+      'factor shows how far measured machine time runs from the declared model.',
+    forecastVsActual:
+      'Three answers to the same question side by side. The local formula, an independent agent prediction issued ' +
+      'before processing, and the measured wall-clock. Both predictions are scored against the actual and the scores ' +
+      'are written back to the run history so the next batch learns from them.',
+    localColumn:
+      'The formula estimate split into machine work and analyst queue wait. "At ingest" is what the formula said ' +
+      'before the data quality was known; the headline is the figure once anomaly and escalation counts were in. ' +
+      'Error vs actual is signed: positive means over-estimated.',
+    agentColumn:
+      'Issued by the forecast agent at ingest, before Stage 2 runs, from this file\'s size and shape plus the history ' +
+      'of comparable batches. It returns a point estimate, a p10 to p90 range, a confidence and a breach probability. ' +
+      'It never gates the pipeline; the agent report shows its full reasoning.',
+    forecastStatus:
+      'RECEIVED: a prediction was parsed and recorded. PENDING: the backend is still polling the platform. ' +
+      'UNPARSEABLE: the agent replied but not with the JSON contract, so nothing was recorded. TIMED_OUT, FAILED and ' +
+      'SKIPPED are shown as they are; no value is ever imputed.',
+    actualColumn:
+      'What the batch really took, from ingest to reconciled. Machine work is compute across the stages; queue wait is ' +
+      'time parked at the analyst queue. While a batch is still parked the clock is running and no error is scored.',
+    stageBreakdown:
+      'The local estimate stage by stage, with the input that drives each one. The structure is declared; the ' +
+      'throughput and queue-wait constants inside it are measured once calibration is available. Stage 4-5 is ' +
+      'highlighted when anomaly triage dominates, since that is where SLA risk usually comes from.',
+    runHistory:
+      'One row per completed batch, newest first. This file is the knowledge base for both the local calibration and ' +
+      'the forecast agent, and the record of how accurate each has been. The summary shows the median absolute error ' +
+      'of each predictor across the runs that have one.',
+  };
 
   history = signal<{ rows: RunHistoryRow[]; calibration: CalibrationSummary } | null>(null);
   historyLoading = signal<boolean>(false);

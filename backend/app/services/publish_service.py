@@ -65,6 +65,13 @@ class PublishService:
     def get_events(self, limit: int = 50) -> List[PublishEvent]:
         return self.published_events[:limit]
 
+    def rehydrate(self, events: List[PublishEvent]) -> None:
+        """Rebuilds the log from persisted batch records at startup, newest first."""
+        self.published_events = list(events)
+
+    def clear(self) -> None:
+        self.published_events.clear()
+
 
 publish_service = PublishService()
 

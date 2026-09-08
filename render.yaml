@@ -1,0 +1,79 @@
+# Render Blueprint — backend API as a web service with a persistent disk.
+#
+# Connect the repo in Render and pick "Blueprint"; every setting below is
+# applied. The secrets (CREWAI_API_KEY and the agent IDs) are marked
+# sync: false so Render prompts for them instead of reading them from git.
+#
+# The frontend is a static Angular build and is deployed separately
+# (Vercel: see frontend/vercel.json; or add a Render static site pointing at
+# frontend/ with publish path dist/frontend/browser).
+services:
+  - type: web
+    name: recon-api
+    runtime: python
+    rootDir: backend
+    plan: starter            # a persistent disk needs a paid instance; see disk below
+    buildCommand: pip install -r requirements.txt
+    # One worker, no --reload: the batch registry, orchestrator and run history
+    # are an in-memory cache over the SQLite file on the disk.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: recon-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: DEBUG
+        value: "false"
+      - key: HOST
+        value: 0.0.0.0
+
+      # Durable state on the mounted disk. Without these the data lives inside
+      # the container filesystem and is lost on every deploy or restart.
+      - key: DB_PATH
+        value: /var/data/recon.db
+      - key: WORKING_FRAMES_DIR
+        value: /var/data/working_frames
+      - key: FORECAST_DIR
+        value: /var/data/forecasts
+      - key: SLA_METRICS_DIR
+        value: /var/data/sla_metrics
+      - key: BATCH_RESULTS_DIR
+        value: /var/data/batch_results
+      - key: INGESTION_STORAGE_DIR
+        value: /var/data/ingestion_storage
+      - key: QUARANTINE_DIR
+        value: /var/data/quarantined_batches
+      - key: ANOMALIES_DIR
+        value: /var/data/anomalies
+      - key: SFTP_DIR
+        value: /var/data/incoming_sftp
+
+      # Agent platform (Aava / CrewAI). Leave an ID blank to have that stage
+      # report SKIPPED; there are no defaults. See AGENTS.md for the prompts.
+      - key: CREWAI_ENABLED
+        value: "true"
+      - key: CREWAI_API_URL
+        value: https://int-ai.aava.ai/agents/execute/agent-executions
+      - key: CREWAI_RETRIEVAL_URL
+        value: https://int-ai.aava.ai/agents/execute/history/execution
+      - key: CREWAI_API_KEY
+        sync: false
+      - key: CREWAI_AGENT_FORECAST_ID
+        sync: false
+      - key: CREWAI_AGENT_ANOMALY_ID
+        sync: false
+      - key: CREWAI_AGENT_RECON_ID
+        sync: false
+      - key: CREWAI_AGENT_SLA_ID
+        sync: false
+      - key: CREWAI_AGENT_EXTRACTION_ID
+        sync: false
+
+      - key: AUTO_AGENT_DISPATCH
+        value: "true"
+      - key: SFTP_AUTO_INGEST
+        value: "true"

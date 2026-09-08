@@ -328,6 +328,42 @@ export interface IngestionResponse {
   gate_passed: boolean;
   quarantined: boolean;
   time_estimate?: TimeEstimate | null;
+  /** Sample-feed pulls only: files still queued after this one. */
+  queue_remaining?: number | null;
+}
+
+export interface FeedQueueEntry {
+  sequence: number;
+  file: string;
+  row_count?: number | null;
+  declared_record_count?: number | null;
+  declared_control_total?: number | null;
+  min_booking_date?: string | null;
+  max_booking_date?: string | null;
+  status: 'PENDING' | 'INGESTED' | 'FAILED' | 'MISSING' | string;
+  batch_id?: string | null;
+  ingested_at?: string | null;
+  error?: string | null;
+}
+
+/** GET /feed/queue — the sample-feed queue loaded from manifest.csv. */
+export interface FeedQueueStatus {
+  pending: number;
+  ingested: number;
+  failed: number;
+  missing: number;
+  total: number;
+  next?: { sequence: number; file: string; row_count?: number | null } | null;
+  recent: FeedQueueEntry[];
+  manifest: string;
+}
+
+/** POST /feed/reset */
+export interface FeedResetResult {
+  queue: FeedQueueStatus;
+  batches_cleared: number;
+  gl_cache_rows: number;
+  run_history_rows_kept: number;
 }
 
 export interface PipelineOverview {

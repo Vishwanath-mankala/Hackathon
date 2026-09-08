@@ -45,7 +45,7 @@ const CHECKPOINTS: { key: string; label: string }[] = [
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/>
               <line x1="12" x2="12" y1="15" y2="3"/>
             </svg>
-            <span>Pull next SFTP drop</span>
+            <span>Pull next feed batch</span>
           }
         </button>
       </div>
@@ -331,7 +331,7 @@ export class StructuralGateComponent implements OnInit {
       next: (res) => {
         this.ingesting.set(false);
         this.loadGate(res.batch_id);
-        this.toast.info('SFTP drop ingested', res.message);
+        this.toast.info('Feed batch ingested', res.message);
       },
       error: (err) => {
         this.ingesting.set(false);

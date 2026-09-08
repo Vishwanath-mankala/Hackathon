@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, OnInit, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, OnInit, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { PipelineService, describeHttpError } from '../../core/services/pipeline.service';
@@ -24,9 +24,9 @@ import { SpinnerComponent } from '../../shared/components/spinner/spinner.compon
         <div class="flex items-center gap-2.5">
           <button
             (click)="simulateSftpDrop()"
-            [disabled]="pipeline.isProcessing()"
+            [disabled]="pipeline.isProcessing() || feedExhausted()"
             class="bg-surface hover:bg-surface-sunken text-text-primary text-[13px] font-medium px-3.5 py-1.5 border border-border-default transition-colors flex items-center gap-2 disabled:opacity-50"
-            title="Ingest the next statement waiting in the SFTP dropbox"
+            [title]="feedTitle()"
           >
             @if (pipeline.isProcessing()) {
               <app-spinner [size]="13" label="Ingesting batch" />
@@ -37,9 +37,25 @@ import { SpinnerComponent } from '../../shared/components/spinner/spinner.compon
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/>
                 <line x1="12" x2="12" y1="15" y2="3"/>
               </svg>
-              <span>Pull next SFTP drop</span>
+              <span>Pull next feed batch</span>
+              @if (feedQueue(); as q) {
+                <span class="font-mono text-[11px] text-text-secondary">· {{ q.pending }} remaining</span>
+              }
             }
           </button>
+
+          @if (feedQueue(); as q) {
+            @if (q.ingested > 0 || q.failed > 0) {
+              <button
+                (click)="resetFeed()"
+                [disabled]="pipeline.isProcessing()"
+                class="bg-surface hover:bg-surface-sunken text-text-secondary text-[12px] font-medium px-3 py-1.5 border border-border-default transition-colors disabled:opacity-50"
+                title="Forget every batch and put the sample feed back to the start. Run history and sign-off trails are kept."
+              >
+                Reset feed
+              </button>
+            }
+          }
 
           <a
             routerLink="/gate"
@@ -308,12 +324,28 @@ export class DashboardComponent implements OnInit {
   overview = this.pipeline.overview;
   batches = this.pipeline.batches;
   events = this.pipeline.publishedEvents;
+  feedQueue = this.pipeline.feedQueue;
 
   publishingId = signal<string | null>(null);
+
+  feedExhausted = computed(() => {
+    const q = this.feedQueue();
+    return !!q && q.pending === 0;
+  });
+
+  feedTitle = computed(() => {
+    const q = this.feedQueue();
+    if (!q) return 'Ingest the next file from the sample-feed queue';
+    if (q.pending === 0) {
+      return `The sample feed is exhausted (${q.ingested} of ${q.total} ingested). Reset it to start over, or upload a statement.`;
+    }
+    return `Next: ${q.next?.file ?? '—'} (${q.next?.row_count ?? '?'} rows) · ${q.ingested} of ${q.total} ingested`;
+  });
 
   ngOnInit() {
     this.reload();
     this.loadPublishEvents();
+    this.pipeline.loadFeedQueue().subscribe({ error: () => {} });
   }
 
   reload() {
@@ -363,12 +395,34 @@ export class DashboardComponent implements OnInit {
   simulateSftpDrop() {
     this.pipeline.simulateSftp().subscribe({
       next: (res) => {
-        // res.message states whether this came from the real dropbox or the
-        // generated sample feed — pass it through rather than paraphrasing.
+        // res.message names the feed position and how many files remain —
+        // pass it through rather than paraphrasing.
         this.toast.success('Batch ingested', res.message);
       },
       error: (err) => {
         this.toast.error('Ingestion failed', describeHttpError(err));
+      }
+    });
+  }
+
+  resetFeed() {
+    const q = this.feedQueue();
+    const ok = confirm(
+      `Reset the sample feed?\n\nThis forgets ${this.batches().length} batch(es), their anomalies and ` +
+      `reconciliation results, restores the GL cache, and requeues all ${q?.total ?? ''} feed files.\n\n` +
+      'Run history and sign-off trails are kept.'
+    );
+    if (!ok) return;
+    this.pipeline.resetFeed().subscribe({
+      next: (res) => {
+        this.toast.success(
+          'Feed reset',
+          `${res.batches_cleared} batch(es) cleared, ${res.queue.pending} files queued, ` +
+          `${res.run_history_rows_kept} history rows kept.`
+        );
+      },
+      error: (err) => {
+        this.toast.error('Reset failed', describeHttpError(err));
       }
     });
   }

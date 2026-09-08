@@ -63,12 +63,23 @@ data/sla_metrics/*
 !data/sla_metrics/.gitkeep
 data/forecasts/*
 !data/forecasts/.gitkeep
+data/working_frames/*
+!data/working_frames/.gitkeep
+data/recon.db
+data/recon.db-wal
+data/recon.db-shm
 incoming_sftp/*.csv
 incoming_sftp/processed/
 
 # Generated from .env at build time — config lives in .env, not here
 frontend/src/environments/environment.generated.ts
-File-Gen Scripts/OutPut/
+
+# File-Gen Scripts/OutPut/cache_gl_cashbook.csv and ingestion_batches/ are the
+# GL cache and the demo feed the deployed app runs on, so they stay tracked.
+# Only what the live pipeline writes there at runtime is ignored.
+File-Gen Scripts/OutPut/anomalies/
+File-Gen Scripts/OutPut/ingestion_storage/
+File-Gen Scripts/__pycache__/
 
 # =============================================================================
 # Operating System & IDEs

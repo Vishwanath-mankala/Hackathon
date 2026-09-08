@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     forecast_dir: Path = PROJECT_ROOT / "data" / "forecasts"
     sftp_dir: Path = PROJECT_ROOT / "incoming_sftp"
 
+    # Durable state: the batch registry, anomalies, match results, the
+    # sample-feed queue and the run history. One SQLite file; point it at
+    # persistent storage in deployment.
+    db_path: Path = PROJECT_ROOT / "data" / "recon.db"
+    # The working frame of a batch parked at the analyst queue, so an override
+    # can still be applied after a restart.
+    working_frames_dir: Path = PROJECT_ROOT / "data" / "working_frames"
+
     # Server Settings
     host: str = "0.0.0.0"
     port: int = 8000
@@ -144,6 +152,7 @@ for _d in (
     settings.batch_results_dir,
     settings.sla_metrics_dir,
     settings.forecast_dir,
+    settings.working_frames_dir,
     settings.sftp_dir,
 ):
     _d.mkdir(parents=True, exist_ok=True)

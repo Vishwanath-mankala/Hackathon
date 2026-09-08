@@ -108,7 +108,10 @@ def test_run_history_row_written_for_clean_batch():
     assert row["wall_seconds"] >= row["machine_seconds"]
     assert row["estimate_at_ingest_sec"] is not None
     assert row["provenance"] == "LIVE"
-    assert run_history_service.path.exists()
+    # Durable: a cold reload from the database returns the same row.
+    run_history_service._rows.clear()
+    run_history_service._loaded = False
+    assert run_history_service.get(res["batch_id"]) == row
 
 
 def test_quarantined_batch_recorded_but_excluded_from_calibration():
@@ -265,8 +268,10 @@ def test_forecast_agent_dispatch_recorded_at_ingest():
         assert "CREWAI_AGENT_FORECAST_ID" in (exec_["message"] or "")
         assert body["agent_forecast"]["status"] == "SKIPPED"
     else:
-        assert exec_["status"] in {"SUBMITTING", "SUBMITTED", "FAILED"}
-        assert body["agent_forecast"]["status"] in {"PENDING", "FAILED", "RECEIVED"}
+        # The ID is set but the suite disables the platform (conftest), so the
+        # dispatch is recorded and skipped rather than sent.
+        assert exec_["status"] in {"SUBMITTING", "SUBMITTED", "FAILED", "SKIPPED"}
+        assert body["agent_forecast"]["status"] in {"PENDING", "FAILED", "RECEIVED", "SKIPPED"}
 
 
 def test_submit_batch_to_agent_zips_every_member(tmp_path, monkeypatch):
@@ -419,5 +424,8 @@ def test_concurrent_record_run_keeps_every_row():
 
     assert not errors
     assert len(run_history_service.rows(limit=500)) == 20
-    with open(run_history_service.path, newline="") as f:
+    with open(run_history_service.export_csv(), newline="") as f:
         assert len(list(csv.DictReader(f))) == 20
+    run_history_service._rows.clear()
+    run_history_service._loaded = False
+    assert len(run_history_service.rows(limit=500)) == 20, "every concurrent upsert must reach the table"

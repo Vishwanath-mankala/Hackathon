@@ -13,25 +13,30 @@ forecast agent predicted. Two consumers read it:
 
 Rows are keyed by batch_id and upserted, not appended: an escalated batch is
 finalised twice (once when parked, once when the last escalation clears), and
-an agent forecast often lands after the run row has already been written. The
-file is rewritten whole on every change via a temp file and os.replace, so a
-reader never sees a partial write and a crash leaves the previous file intact.
+an agent forecast often lands after the run row has already been written.
+
+The durable copy is the `run_history` table in the SQLite database (one row
+per batch, the row dict as JSON). The in-memory dict is the working copy and
+is loaded once per process. `run_history.csv` under the forecast directory is
+rendered on demand for download; a pre-existing one is imported on the first
+load so history recorded before the database existed is not lost.
 
 Single-process only. The orchestrator, the batch registry and this service are
-in-memory with a file behind them; two API workers would interleave writes.
+in-memory with a database behind them; two API workers would each hold their
+own cache.
 """
 import csv
-import os
-import time
+import json
 import logging
 import threading
 from pathlib import Path
 from datetime import datetime
 from statistics import median
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.models.pipeline_models import BatchRecord, TimeEstimate, BatchForecast, GLMatchSummary
 from app.config import settings
+from app import db
 
 logger = logging.getLogger(__name__)
 
@@ -151,17 +156,46 @@ class RunHistoryService:
             self.reset()
 
     def reset(self):
+        """Test hook: forget every row, in memory and in the table. The demo
+        reset endpoint never calls this — history is kept there."""
         with self._lock:
             self._rows.clear()
             self._pending_forecasts.clear()
             self._ingest_features.clear()
+            try:
+                with db.tx() as cx:
+                    cx.execute("DELETE FROM run_history")
+            except Exception as e:
+                logger.error(f"Could not clear run_history table: {e}")
             self._loaded = True
             self._revision += 1
+
+    def forget_transients(self):
+        """Drops in-flight per-batch state (parked forecasts, ingest features)
+        without touching a single recorded row. Used by the demo reset."""
+        with self._lock:
+            self._pending_forecasts.clear()
+            self._ingest_features.clear()
 
     def _ensure_loaded(self):
         if self._loaded:
             return
         self._loaded = True
+        try:
+            with db.read() as cx:
+                for r in cx.execute("SELECT row_json FROM run_history"):
+                    row = json.loads(r["row_json"])
+                    if row.get("batch_id"):
+                        self._rows[row["batch_id"]] = row
+        except Exception as e:
+            logger.error(f"Could not read run_history table: {e}")
+            return
+
+        if self._rows:
+            logger.info(f"Loaded {len(self._rows)} run-history rows from {settings.db_path}.")
+            return
+
+        # One-time import of a history file written before the database existed.
         path = self.path
         if not path.exists():
             return
@@ -171,9 +205,11 @@ class RunHistoryService:
                     row = self._coerce(raw)
                     if row.get("batch_id"):
                         self._rows[row["batch_id"]] = row
-            logger.info(f"Loaded {len(self._rows)} run-history rows from {path}.")
+            if self._rows:
+                self._flush_many(self._rows.values())
+                logger.info(f"Imported {len(self._rows)} run-history rows from {path} into the database.")
         except Exception as e:
-            logger.error(f"Could not read run history at {path}: {e}")
+            logger.error(f"Could not import run history from {path}: {e}")
 
     @staticmethod
     def _coerce(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -188,38 +224,45 @@ class RunHistoryService:
                 row[col] = v if v not in (None, "") else None
         return row
 
-    def _flush(self):
-        """
-        Rewrites the whole file from memory. Temp file + os.replace so a
-        concurrent reader never sees a half-written file. On Windows, replace
-        fails while the destination is open elsewhere; retry briefly, then log
-        and keep the in-memory state authoritative. Never raises into the
-        pipeline — a history write failure must not fail a batch.
-        """
-        path = self.path
-        tmp = path.with_suffix(".csv.tmp")
+    def _flush(self, batch_id: str):
+        """Upserts one row. Never raises into the pipeline — a history write
+        failure is logged and the in-memory state stays authoritative."""
+        row = self._rows.get(batch_id)
+        if row is None:
+            return
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(tmp, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-                writer.writeheader()
-                for row in self._rows.values():
-                    writer.writerow({c: self._cell(row.get(c)) for c in CSV_COLUMNS})
-            for attempt in range(3):
-                try:
-                    os.replace(tmp, path)
-                    return
-                except PermissionError:
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.05)
+            self._flush_many([row])
         except Exception as e:
-            logger.error(f"Could not persist run history to {path}: {e}")
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except OSError:
-                pass
+            logger.error(f"Could not persist run-history row {batch_id}: {e}")
+
+    @staticmethod
+    def _flush_many(rows: Iterable[Dict[str, Any]]):
+        with db.tx() as cx:
+            cx.executemany(
+                """INSERT INTO run_history (batch_id, completed_at, outcome, provenance, row_json)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(batch_id) DO UPDATE SET
+                     completed_at=excluded.completed_at, outcome=excluded.outcome,
+                     provenance=excluded.provenance, row_json=excluded.row_json""",
+                [
+                    (r["batch_id"], r.get("completed_at"), r.get("outcome"), r.get("provenance"), json.dumps(r))
+                    for r in rows
+                ],
+            )
+
+    def export_csv(self) -> Path:
+        """Renders the whole history to `run_history.csv` for download."""
+        path = self.path
+        with self._lock:
+            self._ensure_loaded()
+            rows = list(self._rows.values())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({c: self._cell(row.get(c)) for c in CSV_COLUMNS})
+        return path
 
     @staticmethod
     def _cell(value: Any) -> Any:
@@ -392,7 +435,7 @@ class RunHistoryService:
 
             self._rows[batch.batch_id] = row
             self._revision += 1
-            self._flush()
+            self._flush(batch.batch_id)
             return dict(row)
 
     @staticmethod
@@ -436,13 +479,13 @@ class RunHistoryService:
                     self._apply_forecast(row, forecast)
                     row["forecast_error_pct"] = None
                     self._revision += 1
-                    self._flush()
+                    self._flush(batch_id)
                 return None
 
             self._apply_forecast(row, forecast)
             row["forecast_error_pct"] = _signed_error_pct(row.get("forecast_seconds"), row.get("wall_seconds"))
             self._revision += 1
-            self._flush()
+            self._flush(batch_id)
             return dict(row)
 
     @staticmethod
@@ -580,7 +623,12 @@ class RunHistoryService:
 
             if added:
                 self._revision += 1
-                self._flush()
+                try:
+                    self._flush_many(
+                        r for r in self._rows.values() if r.get("provenance") == "BACKFILL_SLA_METRICS"
+                    )
+                except Exception as e:
+                    logger.error(f"Could not persist backfilled run history: {e}")
                 logger.info(f"Backfilled {added} run-history rows from existing SLA metrics artefacts.")
         return added
 

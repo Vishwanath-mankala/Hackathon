@@ -18,13 +18,15 @@ from app.models.pipeline_models import (
     ForecastComparison,
     RunHistoryRow,
     CalibrationSummary,
+    FeedQueueStatus,
+    FeedResetResult,
     GLMatchSummary,
     PublishEvent,
     PipelineOverview,
     HumanResolveRequest,
     IngestionResponse
 )
-from app.services.pipeline_orchestrator import pipeline_orchestrator
+from app.services.pipeline_orchestrator import pipeline_orchestrator, QueueConflict
 from app.services.publish_service import publish_service
 from app.services.ingestion_service import ingestion_service
 from app.services.recon_service import recon_service
@@ -128,29 +130,32 @@ async def ingest_batch_file(
 
 @router.post("/simulate-sftp", response_model=IngestionResponse)
 def pull_next_sftp_drop(
-    filename: Optional[str] = Query(None, description="Specific file to ingest from the dropbox or sample feed")
+    filename: Optional[str] = Query(None, description="Specific queued sample file to ingest (retries a FAILED one)")
 ):
     """
-    Ingests the next statement waiting in `incoming_sftp/` on demand.
+    Ingests the next statement from the sample-feed queue.
 
-    If the dropbox is empty it falls back to the generated sample feed, and that
-    batch is tagged `SAMPLE_FEED` — the response message says which source was
-    used, so generated data is never presented as a genuine bank arrival.
+    The queue is `manifest.csv` loaded into the database, so its position
+    survives a restart and repeated pulls walk the feed in order. The batch is
+    tagged `SAMPLE_FEED` and the manifest's declared record count and control
+    total go through the structural gate. Real SFTP arrivals in
+    `incoming_sftp/` are picked up by the startup poll.
     """
     try:
-        batch, origin = pipeline_orchestrator.pull_next_sftp_drop(filename=filename)
+        batch, _origin, remaining = pipeline_orchestrator.pull_next_sftp_drop(filename=filename)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except QueueConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
-    if origin == "SFTP":
-        message = f"SFTP drop {batch.filename} ingested. Stage: {batch.stage}"
-    else:
-        message = (
-            f"SFTP dropbox is empty — ingested generated sample {batch.filename} instead, "
-            f"tagged SAMPLE_FEED. Stage: {batch.stage}"
-        )
+    queue = pipeline_orchestrator.queue_status()
+    position = next(
+        (r["sequence"] for r in queue["recent"] if r.get("batch_id") == batch.batch_id), None
+    )
+    where = f"Feed batch {position} of {queue['total']}" if position else "Feed batch"
+    message = f"{where} ({batch.filename}) ingested, tagged SAMPLE_FEED. Stage: {batch.stage}. {remaining} remaining."
 
     return IngestionResponse(
         batch_id=batch.batch_id,
@@ -160,8 +165,29 @@ def pull_next_sftp_drop(
         record_count=batch.total_records,
         gate_passed=bool(batch.gate_passed),
         quarantined=batch.stage == "GATE_QUARANTINED",
-        time_estimate=batch.time_estimate
+        time_estimate=batch.time_estimate,
+        queue_remaining=remaining,
     )
+
+
+@router.get("/feed/queue", response_model=FeedQueueStatus)
+def get_feed_queue():
+    """The sample-feed queue: how many files are pending, ingested, failed or missing, and which is next."""
+    return pipeline_orchestrator.queue_status()
+
+
+@router.post("/feed/reset", response_model=FeedResetResult)
+def reset_feed():
+    """
+    Demo reset. Forgets every batch (registry, anomalies, match results, parked
+    clocks, working frames), restores the GL cache to its full size and puts
+    the sample feed back to the start. Keeps the run history, the sign-off
+    trails and every artefact on disk.
+    """
+    try:
+        return pipeline_orchestrator.reset_state(requeue=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
 
 
 @router.get("/batches/{batch_id}/gate", response_model=StructuralGateDetails)
@@ -291,16 +317,16 @@ def get_run_history(
     return {
         "rows": rows,
         "calibration": time_estimator_service.calibration_summary(),
-        "file": str(run_history_service.path) if run_history_service.path.exists() else None,
+        "file": str(run_history_service.path),
     }
 
 
 @router.get("/run-history/file")
 def download_run_history():
-    """Downloads the master run_history.csv."""
-    path = run_history_service.path
-    if not path.exists():
+    """Renders the whole run history to CSV and downloads it."""
+    if run_history_service.stats()["total_runs_recorded"] == 0:
         raise HTTPException(status_code=404, detail="No run has been recorded yet.")
+    path = run_history_service.export_csv()
     return FileResponse(path=str(path), filename=path.name, media_type="text/csv")
 
 
@@ -322,9 +348,7 @@ def publish_batch_results(batch_id: str):
     """Broadcasts batch completion and reconciliation summary to downstream message bus."""
     if batch_id not in pipeline_orchestrator.batches:
         raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
-    batch = pipeline_orchestrator.batches[batch_id]
-    event = publish_service.publish_batch(batch)
-    return event
+    return pipeline_orchestrator.publish(batch_id)
 
 
 @router.get("/publish/events", response_model=List[PublishEvent])

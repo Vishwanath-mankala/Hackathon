@@ -18,6 +18,8 @@ import {
   ConfiguredAgent,
   ForecastComparison,
   RunHistoryResponse,
+  FeedQueueStatus,
+  FeedResetResult,
   SignoffRequest
 } from '../models/pipeline.models';
 import { environment } from '../../../environments/environment.generated';
@@ -53,6 +55,8 @@ export class PipelineService {
   readonly publishedEvents = signal<PublishEvent[]>([]);
   readonly agentExecutions = signal<Record<string, AgentExecution>>({});
   readonly configuredAgents = signal<ConfiguredAgent[]>([]);
+  /** Sample-feed queue position; null until loaded. */
+  readonly feedQueue = signal<FeedQueueStatus | null>(null);
 
   // ---- Request state --------------------------------------------------------
   readonly overviewLoading = signal<boolean>(false);
@@ -159,6 +163,10 @@ export class PipelineService {
     );
   }
 
+  /**
+   * Pulls the next file from the sample-feed queue (manifest.csv loaded into
+   * the backend's database, so the position survives restarts).
+   */
   simulateSftp(filename?: string): Observable<IngestionResponse> {
     this.isProcessing.set(true);
     let params = new HttpParams();
@@ -170,6 +178,30 @@ export class PipelineService {
           next: () => this.selectBatch(res.batch_id),
           error: () => {}
         });
+        this.loadFeedQueue().subscribe({ error: () => {} });
+      }),
+      finalize(() => this.isProcessing.set(false))
+    );
+  }
+
+  loadFeedQueue(): Observable<FeedQueueStatus> {
+    return this.http.get<FeedQueueStatus>(`${this.baseUrl}/feed/queue`).pipe(
+      tap(q => this.feedQueue.set(q))
+    );
+  }
+
+  /** Demo reset: forgets every batch and requeues the feed; keeps run history and sign-offs. */
+  resetFeed(): Observable<FeedResetResult> {
+    this.isProcessing.set(true);
+    return this.http.post<FeedResetResult>(`${this.baseUrl}/feed/reset`, null).pipe(
+      tap(res => {
+        this.feedQueue.set(res.queue);
+        this.selectedBatchId.set(null);
+        this.selectedBatch.set(null);
+        this.agentExecutions.set({});
+        this.currentAnomalies.set([]);
+        this.loadOverview().subscribe({ error: () => {} });
+        this.loadPublishEvents().subscribe({ error: () => {} });
       }),
       finalize(() => this.isProcessing.set(false))
     );

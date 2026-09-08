@@ -1190,9 +1190,11 @@ exists (it cannot today, but the ordering is not guaranteed) is parked and merge
 by the next `record_run`. The console's poll shares the same code path
 (`_refresh_one`), so it can pick a result up too; both are idempotent.
 
-Restart behaviour: the history file persists; in-flight batches and their poller
-threads do not. A forecast outstanding at restart is simply never captured, and
-its row keeps a blank forecast.
+Restart behaviour: batches, their execution logs and the run history are
+persisted in `data/recon.db` and come back after a restart; poller threads do
+not. A forecast outstanding at restart is simply never captured, and its row
+keeps a blank forecast (the console's poll can still pick it up if the platform
+finishes later, since `/agent/output` shares the capture path).
 
 ### Endpoints
 

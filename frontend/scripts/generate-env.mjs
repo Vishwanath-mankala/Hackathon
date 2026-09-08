@@ -6,6 +6,10 @@
  * `prebuild`, which means the API URL the app talks to and the one the backend
  * serves come from the same file — there is no second source to drift from.
  *
+ * On a hosted build (Vercel, Render) there is no .env file; the same keys are
+ * read from the process environment instead, and a process variable always
+ * wins over the file so a host setting cannot be shadowed by a committed value.
+ *
  * The generated file is git-ignored: it is a build artefact, not config.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -42,8 +46,11 @@ function parseEnv(text) {
 let env = {};
 if (existsSync(ENV_FILE)) {
   env = parseEnv(readFileSync(ENV_FILE, 'utf8'));
-} else {
-  console.warn(`[generate-env] No .env at ${ENV_FILE} — falling back to defaults.`);
+} else if (!process.env.API_BASE_URL) {
+  console.warn(`[generate-env] No .env at ${ENV_FILE} and no API_BASE_URL in the environment — falling back to defaults.`);
+}
+for (const key of ['API_BASE_URL', 'HOST', 'PORT']) {
+  if (process.env[key] !== undefined && process.env[key] !== '') env[key] = process.env[key];
 }
 
 // An explicit API_BASE_URL wins. Otherwise derive it from the HOST/PORT the

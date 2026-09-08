@@ -44,8 +44,10 @@ from app.services.ingestion_service import ingestion_service
 from app.services.agentic_anomaly_service import agentic_anomaly_service
 from app.services.time_estimator_service import time_estimator_service
 from app.services.run_history_service import run_history_service
+from app.services.feed_queue_service import feed_queue_service
 from app.services.publish_service import publish_service
 from app.config import settings
+from app import db
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,20 @@ import rule_engine  # noqa: E402  (path-injected sibling module)
 # Aava execution states that mean the job is finished and no longer worth polling.
 TERMINAL_AGENT_STATES = {"SUCCESS", "COMPLETED", "FAILED", "ERROR", "CANCELLED"}
 
+# Stages a batch can only be in while the pipeline is actually running it. A
+# batch found in one of these at startup was cut off by a restart.
+MID_PIPELINE_STAGES = {"INGESTED", "GATE_PASSED", "RULE_VALIDATED"}
+
+
+class QueueConflict(Exception):
+    """The requested feed file has already been turned into a batch."""
+
+
+# Engine-prepared GL cache rows, keyed by (path, mtime). Parsing them is the
+# expensive part of building a RuleEngine; it happens once per process.
+_GL_SNAPSHOT: Dict[Any, List[Dict[str, Any]]] = {}
+_GL_SNAPSHOT_LOCK = threading.Lock()
+
 
 class PipelineOrchestrator:
     def __init__(self):
@@ -68,32 +84,341 @@ class PipelineOrchestrator:
         self.gl_cache: Optional[pd.DataFrame] = None
         self._recon_engine = None
         self._reconciled_batches: set = set()
-        self._ingested_sources: set = set()   # resolved paths already turned into a batch
         # Per-batch stopwatch: machine time accumulates while processing, queue
         # time while parked at the analyst queue. See _clock_*.
         self._clocks: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.Lock()
-        self._load_gl_cache()
+        # Guards the batch records themselves. Daemon threads (agent submit,
+        # forecast poll) hold it while they update an execution and then
+        # checkpoint, so it has to be re-entrant.
+        self._lock = threading.RLock()
+        # Serialises whole pipeline runs. Stage 6 slices the shared RuleEngine's
+        # match list by position, so two batches running at once would each
+        # collect the other's matches; and it makes claiming a feed-queue row
+        # trivially atomic.
+        self._pipeline_lock = threading.RLock()
+
+        db.init_schema()
+        consumed = self._load_state()
+        self._load_gl_cache(consumed)
         try:
             run_history_service.backfill_from_sla_metrics()
         except Exception as e:
             logger.warning(f"Run-history backfill skipped: {e}")
+        try:
+            total = self.sync_feed_queue()
+            logger.info("Sample-feed queue: %s", self._queue_summary_line(total))
+        except Exception as e:
+            logger.warning(f"Sample-feed queue sync skipped: {e}")
         self._poll_sftp_dropbox()
 
     # =========================================================================
     # Bootstrap
     # =========================================================================
-    def _load_gl_cache(self):
-        """Loads the GL cashbook cache used by Stage 6 reconciliation."""
+    def _load_state(self) -> set:
+        """
+        Rehydrates the batch registry, anomalies and match results from the
+        database, restarts the stopwatch of any batch parked at the analyst
+        queue so its wait spans the restart, marks batches that were cut off
+        mid-pipeline, and returns the GL ids already consumed by Stage 6.
+        """
+        consumed: set = set()
+        now_mono = time.monotonic()
+        now_epoch = time.time()
+        interrupted: List[str] = []
+
+        with db.read() as cx:
+            for r in cx.execute("SELECT * FROM batches ORDER BY created_at"):
+                try:
+                    batch = BatchRecord.model_validate_json(r["record_json"])
+                except Exception as e:
+                    logger.error(f"Skipping unreadable batch row {r['batch_id']}: {e}")
+                    continue
+                self.batches[batch.batch_id] = batch
+                if batch.stage == "ESCALATED_FOR_REVIEW" and r["held_at_epoch"] is not None:
+                    self._clocks[batch.batch_id] = {
+                        "segment_start": now_mono,
+                        "machine_accum": r["machine_accum"] or 0.0,
+                        "queue_accum": r["queue_accum"] or 0.0,
+                        "held_at": now_mono - (now_epoch - r["held_at_epoch"]),
+                        "held_at_epoch": r["held_at_epoch"],
+                    }
+                elif batch.stage in MID_PIPELINE_STAGES:
+                    interrupted.append(batch.batch_id)
+
+            for r in cx.execute("SELECT batch_id, items_json FROM batch_anomalies"):
+                try:
+                    self.batch_anomalies[r["batch_id"]] = [
+                        AnomalyItem.model_validate(item) for item in json.loads(r["items_json"])
+                    ]
+                except Exception as e:
+                    logger.error(f"Skipping unreadable anomalies for {r['batch_id']}: {e}")
+
+            for r in cx.execute("SELECT batch_id, results_json FROM batch_match_results"):
+                try:
+                    results = json.loads(r["results_json"])
+                except Exception as e:
+                    logger.error(f"Skipping unreadable match results for {r['batch_id']}: {e}")
+                    continue
+                self.batch_match_results[r["batch_id"]] = results
+                for m in results.get("matched", []):
+                    gl_id = m.get("internal_txn_id")
+                    if gl_id:
+                        consumed.add(str(gl_id))
+
+        for batch_id in self.batches:
+            self.batch_anomalies.setdefault(batch_id, [])
+        self._reconciled_batches = set(self.batch_match_results)
+
+        for batch_id in interrupted:
+            batch = self.batches[batch_id]
+            batch.stage = "INTERRUPTED"
+            batch.failure_reason = "The API restarted while this batch was mid-pipeline."
+            batch.updated_at = self._now()
+            self._checkpoint(batch_id)
+            logger.warning(f"Batch {batch_id} was mid-pipeline at restart; marked INTERRUPTED.")
+
+        events = sorted(
+            (b.publish_event for b in self.batches.values() if b.publish_event),
+            key=lambda e: e.published_at, reverse=True,
+        )
+        publish_service.rehydrate(events)
+
+        if self.batches:
+            logger.info(
+                "Restored %d batches from %s (%d parked at the analyst queue, %d interrupted).",
+                len(self.batches), settings.db_path, len(self._clocks), len(interrupted),
+            )
+        return consumed
+
+    def _load_gl_cache(self, consumed_ids: Optional[set] = None):
+        """
+        Loads the GL cashbook cache used by Stage 6 reconciliation, minus the
+        rows batches in the registry have already settled.
+
+        The engine's constructor parses every cache row (about 14 s for 37k
+        rows) and removes a matched row from its lists as it goes, with no way
+        to put one back. So the parsed rows are kept as a pristine snapshot,
+        built once per process, and every engine — at startup minus the
+        consumed ids, or on a demo reset in full — is assembled from copies of
+        that snapshot in well under a second.
+        """
         if not settings.cache_path.exists():
             logger.warning(f"GL cashbook cache not found at {settings.cache_path}; Stage 6 will report zero matches.")
             return
         try:
-            self.gl_cache = pd.read_csv(settings.cache_path, dtype=str, keep_default_na=False)
-            self._recon_engine = rule_engine.RuleEngine(self.gl_cache, rule_engine.MatchConfig())
-            logger.info(f"Loaded GL Cashbook Cache: {len(self.gl_cache)} rows.")
+            pristine = self._pristine_gl_rows()
+            consumed = consumed_ids or set()
+            self._recon_engine = self._engine_from_pristine(pristine, consumed)
+            self.gl_cache = self._recon_engine.remaining_cache_df()
+            logger.info(
+                "Loaded GL Cashbook Cache: %d rows available (%d already consumed by restored batches).",
+                len(self._recon_engine.cache), len(pristine) - len(self._recon_engine.cache),
+            )
         except Exception as e:
             logger.warning(f"Failed to load GL cache: {e}")
+
+    @staticmethod
+    def _pristine_gl_rows() -> List[Dict[str, Any]]:
+        """The engine-prepared cache rows, parsed once per process per cache file."""
+        path = settings.cache_path
+        key = (str(path.resolve()), path.stat().st_mtime_ns)
+        with _GL_SNAPSHOT_LOCK:
+            cached = _GL_SNAPSHOT.get(key)
+            if cached is None:
+                frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+                engine = rule_engine.RuleEngine(frame, rule_engine.MatchConfig())
+                cached = engine.cache
+                _GL_SNAPSHOT.clear()
+                _GL_SNAPSHOT[key] = cached
+            return cached
+
+    @staticmethod
+    def _engine_from_pristine(pristine: List[Dict[str, Any]], consumed: set):
+        """
+        A fresh engine holding copies of every pristine row not in `consumed`.
+        Relies on the engine's public state (`cache`, `cache_by_account`,
+        `matches`, `ambiguous`, `unmatched_ingest`) exactly as its constructor
+        lays it out.
+        """
+        engine = rule_engine.RuleEngine(pd.DataFrame(), rule_engine.MatchConfig())
+        rows = [dict(r) for r in pristine if str(r.get("internal_txn_id")) not in consumed]
+        by_account: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            by_account.setdefault(str(r.get("account", "")).strip(), []).append(r)
+        engine.cache = rows
+        engine.cache_by_account = by_account
+        engine.matches = []
+        engine.ambiguous = []
+        engine.unmatched_ingest = []
+        return engine
+
+    # =========================================================================
+    # Durable state
+    # =========================================================================
+    def _checkpoint(
+        self,
+        batch_id: str,
+        *,
+        anomalies: bool = False,
+        results: bool = False,
+        queue_row: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Writes the batch (and optionally its anomalies / match results) to the
+        database in one transaction. Serialisation happens under the record
+        lock so a daemon-thread update cannot land half-way through a dump.
+        Never raises into the pipeline: a persistence failure is logged and the
+        in-memory state stays authoritative.
+        """
+        with self._lock:
+            batch = self.batches.get(batch_id)
+            if not batch:
+                return
+            clock = self._clocks.get(batch_id) or {}
+            try:
+                record_json = batch.model_dump_json()
+                anomalies_json = (
+                    json.dumps([a.model_dump() for a in self.batch_anomalies.get(batch_id, [])])
+                    if anomalies else None
+                )
+                results_json = (
+                    json.dumps(self.batch_match_results[batch_id])
+                    if results and batch_id in self.batch_match_results else None
+                )
+                with db.tx() as cx:
+                    cx.execute(
+                        """INSERT INTO batches
+                           (batch_id, created_at, updated_at, stage, source, filename, record_json,
+                            machine_accum, queue_accum, held_at_epoch)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(batch_id) DO UPDATE SET
+                             updated_at=excluded.updated_at, stage=excluded.stage,
+                             record_json=excluded.record_json, machine_accum=excluded.machine_accum,
+                             queue_accum=excluded.queue_accum, held_at_epoch=excluded.held_at_epoch""",
+                        (
+                            batch.batch_id, batch.created_at, batch.updated_at, batch.stage,
+                            batch.source, batch.filename, record_json,
+                            self._banked_machine(batch_id), clock.get("queue_accum", 0.0),
+                            clock.get("held_at_epoch"),
+                        ),
+                    )
+                    if anomalies_json is not None:
+                        cx.execute(
+                            "INSERT INTO batch_anomalies (batch_id, items_json) VALUES (?, ?) "
+                            "ON CONFLICT(batch_id) DO UPDATE SET items_json=excluded.items_json",
+                            (batch_id, anomalies_json),
+                        )
+                    if results_json is not None:
+                        cx.execute(
+                            "INSERT INTO batch_match_results (batch_id, results_json) VALUES (?, ?) "
+                            "ON CONFLICT(batch_id) DO UPDATE SET results_json=excluded.results_json",
+                            (batch_id, results_json),
+                        )
+                    if queue_row is not None:
+                        feed_queue_service.mark_ingested(cx, int(queue_row["sequence"]), batch_id)
+            except Exception as e:
+                logger.error(f"Could not persist batch {batch_id}: {e}")
+
+    def _banked_machine(self, batch_id: str) -> float:
+        """Machine seconds to store: what has been banked, plus the running
+        segment if the batch is not parked (so a restart mid-run keeps it)."""
+        c = self._clocks.get(batch_id)
+        if not c:
+            return 0.0
+        if c["held_at"] is not None:
+            return c["machine_accum"]
+        return c["machine_accum"] + (time.monotonic() - c["segment_start"])
+
+    def _frame_path(self, batch_id: str) -> Path:
+        return settings.working_frames_dir / f"{batch_id}.pkl"
+
+    def _save_working_frame(self, batch_id: str):
+        """Pickle, not CSV: the frame's index labels and NaN cells have to
+        survive exactly, because anomalies address rows by index label."""
+        df = self.batch_dfs.get(batch_id)
+        if df is None:
+            return
+        try:
+            path = self._frame_path(batch_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_pickle(path)
+        except Exception as e:
+            logger.error(f"Could not save working frame for {batch_id}: {e}")
+
+    def _load_working_frame(self, batch_id: str) -> Optional[pd.DataFrame]:
+        path = self._frame_path(batch_id)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_pickle(path)
+            self.batch_dfs[batch_id] = df
+            return df
+        except Exception as e:
+            logger.error(f"Could not load working frame for {batch_id}: {e}")
+            return None
+
+    def _drop_working_frame(self, batch_id: str):
+        try:
+            path = self._frame_path(batch_id)
+            if path.exists():
+                path.unlink()
+        except OSError as e:
+            logger.warning(f"Could not remove working frame for {batch_id}: {e}")
+
+    # =========================================================================
+    # Sample-feed queue
+    # =========================================================================
+    def sync_feed_queue(self, reset: bool = False) -> int:
+        return feed_queue_service.sync_from_manifest(reset=reset)
+
+    def queue_status(self) -> Dict[str, Any]:
+        return feed_queue_service.status()
+
+    @staticmethod
+    def _queue_summary_line(total: int) -> str:
+        s = feed_queue_service.status()
+        return (
+            f"{s['pending']} pending, {s['ingested']} ingested, {s['failed']} failed, "
+            f"{s['missing']} missing of {total}"
+            + (f"; next {s['next']['file']}" if s["next"] else "")
+        )
+
+    def reset_state(self, requeue: bool = True) -> Dict[str, Any]:
+        """
+        Demo reset: forget every batch and put the sample feed back to the
+        start. Keeps the run history (real measurements), the sign-off trails
+        and every artefact on disk; clears the registry, anomalies, match
+        results, parked clocks and working frames, and restores the GL cache
+        to its full size.
+        """
+        with self._pipeline_lock, self._lock:
+            cleared = len(self.batches)
+            with db.tx() as cx:
+                db.clear_tables(cx, "batches", "batch_anomalies", "batch_match_results")
+                if requeue:
+                    cx.execute("DELETE FROM feed_queue")
+            self.batches.clear()
+            self.batch_dfs.clear()
+            self.batch_anomalies.clear()
+            self.batch_match_results.clear()
+            self._reconciled_batches.clear()
+            self._clocks.clear()
+            publish_service.clear()
+            run_history_service.forget_transients()
+            for pkl in settings.working_frames_dir.glob("*.pkl"):
+                try:
+                    pkl.unlink()
+                except OSError:
+                    pass
+            self._load_gl_cache(set())
+            if requeue:
+                self.sync_feed_queue(reset=True)
+            return {
+                "queue": self.queue_status(),
+                "batches_cleared": cleared,
+                "gl_cache_rows": len(self._recon_engine.cache) if self._recon_engine else 0,
+                "run_history_rows_kept": run_history_service.stats()["total_runs_recorded"],
+            }
 
     def _poll_sftp_dropbox(self):
         """
@@ -141,53 +466,67 @@ class PipelineOrchestrator:
 
     def pull_next_sftp_drop(self, filename: Optional[str] = None):
         """
-        Ingests one waiting statement on demand, for an operator who does not want
-        to wait for the next restart poll.
+        Ingests the next statement from the sample-feed queue on demand. The
+        queue (manifest.csv loaded into the database) is the source: its
+        position survives a restart, so repeated pulls walk the feed in order
+        instead of re-ingesting the first file. Real SFTP arrivals in
+        incoming_sftp/ are picked up by the startup poll.
 
-        Prefers a real file in the dropbox. Only if the dropbox is empty does it
-        fall back to the generated sample feed, and that batch is tagged
-        SAMPLE_FEED rather than SFTP so the console never presents generated data
-        as a genuine bank arrival.
+        With `filename`, ingests that specific queued file: PENDING or FAILED
+        rows are ingested (FAILED is the retry path); an INGESTED row raises
+        QueueConflict naming its batch; MISSING or unknown raises
+        FileNotFoundError.
 
-        Returns (batch, origin) where origin is "SFTP" or "SAMPLE_FEED".
+        Returns (batch, "SAMPLE_FEED", remaining_pending).
         """
-        if filename:
-            for candidate in (settings.sftp_dir / filename, settings.batches_dir / filename):
-                if candidate.exists():
-                    origin = "SFTP" if candidate.parent == settings.sftp_dir else "SAMPLE_FEED"
-                    batch = self.ingest_batch(
-                        file_path=candidate, filename=candidate.name, source=origin, auto_run_pipeline=True
+        with self._pipeline_lock:
+            if filename:
+                row = feed_queue_service.get(filename)
+                if row is None:
+                    raise FileNotFoundError(
+                        f"'{filename}' is not in the sample-feed queue. "
+                        f"Files are listed in {settings.manifest_path}."
                     )
-                    if origin == "SFTP":
-                        self._archive_sftp_file(candidate)
-                    return batch, origin
-            raise FileNotFoundError(
-                f"'{filename}' is not in the SFTP dropbox or the generated sample feed."
-            )
+                if row["status"] == "INGESTED":
+                    raise QueueConflict(
+                        f"'{filename}' has already been ingested as batch {row['batch_id']}."
+                    )
+                if row["status"] == "MISSING":
+                    raise FileNotFoundError(
+                        f"'{filename}' is listed in the manifest but is not on disk under {settings.batches_dir}."
+                    )
+            else:
+                row = feed_queue_service.next_pending()
+                if row is None:
+                    s = feed_queue_service.status()
+                    raise FileNotFoundError(
+                        f"The sample feed is exhausted: {s['ingested']} ingested, {s['failed']} failed, "
+                        f"{s['missing']} missing of {s['total']}. Reset the feed to start over, "
+                        "or upload a statement."
+                    )
 
-        waiting = sorted(settings.sftp_dir.glob("*.csv"))
-        if waiting:
-            target = waiting[0]
-            batch = self.ingest_batch(
-                file_path=target, filename=target.name, source="SFTP", auto_run_pipeline=True
-            )
-            self._archive_sftp_file(target)
-            return batch, "SFTP"
+            source_path = settings.batches_dir / row["file"]
+            declared_count = row.get("declared_record_count")
+            declared_total = row.get("declared_control_total")
+            try:
+                batch = self.ingest_batch(
+                    file_path=source_path,
+                    filename=row["file"],
+                    source="SAMPLE_FEED",
+                    declared_record_count=int(declared_count) if declared_count is not None else None,
+                    declared_control_total=float(declared_total) if declared_total is not None else None,
+                    auto_run_pipeline=True,
+                    queue_row=row,
+                )
+            except Exception as e:
+                # No batch exists if ingest_file itself failed; a FAILED row is
+                # skipped by blind pulls rather than retried forever.
+                if feed_queue_service.get(row["file"]) and feed_queue_service.get(row["file"])["status"] != "INGESTED":
+                    feed_queue_service.mark_failed(int(row["sequence"]), str(e))
+                raise
 
-        # Dropbox empty — offer the next generated sample not already ingested,
-        # so repeated clicks walk the feed instead of re-ingesting one file.
-        for sample in sorted(settings.batches_dir.glob("ingest_batch_*.csv")):
-            if str(sample.resolve()) in self._ingested_sources:
-                continue
-            batch = self.ingest_batch(
-                file_path=sample, filename=sample.name, source="SAMPLE_FEED", auto_run_pipeline=True
-            )
-            return batch, "SAMPLE_FEED"
-
-        raise FileNotFoundError(
-            "No statement waiting in incoming_sftp/, and every generated sample batch "
-            "has already been ingested. Drop a file into incoming_sftp/ or upload one."
-        )
+            remaining = feed_queue_service.status()["pending"]
+            return batch, "SAMPLE_FEED", remaining
 
     # =========================================================================
     # Stage 1 — Ingestion
@@ -200,61 +539,75 @@ class PipelineOrchestrator:
         source: str = "UPLOAD",
         declared_record_count: Optional[int] = None,
         declared_control_total: Optional[float] = None,
-        auto_run_pipeline: bool = True
+        auto_run_pipeline: bool = True,
+        queue_row: Optional[Dict[str, Any]] = None,
     ) -> BatchRecord:
-        # The clock starts before the file is stored and parsed: the estimate
-        # models parse time, so the measurement has to include it.
-        ingest_started = time.monotonic()
-        batch_id, stored_path, meta, df = ingestion_service.ingest_file(
-            file_path=file_path,
-            file_bytes=file_bytes,
-            filename=filename,
-            source=source,
-            declared_record_count=declared_record_count,
-            declared_control_total=declared_control_total
-        )
-        self._clock_start(batch_id, ingest_started)
+        with self._pipeline_lock:
+            # The clock starts before the file is stored and parsed: the estimate
+            # models parse time, so the measurement has to include it.
+            ingest_started = time.monotonic()
+            batch_id, stored_path, meta, df = ingestion_service.ingest_file(
+                file_path=file_path,
+                file_bytes=file_bytes,
+                filename=filename,
+                source=source,
+                declared_record_count=declared_record_count,
+                declared_control_total=declared_control_total
+            )
+            self._clock_start(batch_id, ingest_started)
 
-        now_str = self._now()
+            now_str = self._now()
 
-        time_est = time_estimator_service.estimate_processing_time(
-            batch_id=batch_id,
-            file_size_bytes=meta["file_size_bytes"],
-            record_count=len(df),
-            anomaly_count=0,
-            escalated_count=0
-        )
+            time_est = time_estimator_service.estimate_processing_time(
+                batch_id=batch_id,
+                file_size_bytes=meta["file_size_bytes"],
+                record_count=len(df),
+                anomaly_count=0,
+                escalated_count=0
+            )
 
-        record = BatchRecord(
-            batch_id=batch_id,
-            filename=filename,
-            file_size_bytes=meta["file_size_bytes"],
-            source=source,
-            stage="INGESTED",
-            total_records=len(df),
-            valid_records_count=len(df),
-            created_at=now_str,
-            updated_at=now_str,
-            time_estimate=time_est,
-            estimate_at_ingest_sec=time_est.total_estimated_seconds,
-            batch_file_path=str(stored_path)
-        )
+            record = BatchRecord(
+                batch_id=batch_id,
+                filename=filename,
+                file_size_bytes=meta["file_size_bytes"],
+                source=source,
+                stage="INGESTED",
+                total_records=len(df),
+                valid_records_count=len(df),
+                created_at=now_str,
+                updated_at=now_str,
+                time_estimate=time_est,
+                estimate_at_ingest_sec=time_est.total_estimated_seconds,
+                batch_file_path=str(stored_path)
+            )
 
-        self.batches[batch_id] = record
-        self.batch_dfs[batch_id] = df
-        self.batch_anomalies[batch_id] = []
-        if file_path is not None:
-            self._ingested_sources.add(str(Path(file_path).resolve()))
+            self.batches[batch_id] = record
+            self.batch_dfs[batch_id] = df
+            self.batch_anomalies[batch_id] = []
 
-        # Stage 1 forecast: issued before processing from what is known now plus
-        # the history of comparable batches. Registered after the batch is in the
-        # registry, since the submit thread looks it up by id.
-        self._dispatch_forecast(record, meta)
+            # First durable copy — and, for a feed pull, the queue row is marked
+            # INGESTED in the same transaction so the two cannot disagree.
+            self._checkpoint(batch_id, queue_row=queue_row)
 
-        if auto_run_pipeline:
-            self.run_pipeline(batch_id, stored_path, meta)
+            try:
+                # Stage 1 forecast: issued before processing from what is known
+                # now plus the history of comparable batches. Registered after
+                # the batch is in the registry, since the submit thread looks it
+                # up by id.
+                self._dispatch_forecast(record, meta)
 
-        return record
+                if auto_run_pipeline:
+                    self.run_pipeline(batch_id, stored_path, meta)
+            except Exception as e:
+                record.stage = "FAILED"
+                record.failure_reason = f"{type(e).__name__}: {e}"
+                record.updated_at = self._now()
+                logger.exception(f"Pipeline failed for batch {batch_id}")
+                raise
+            finally:
+                self._checkpoint(batch_id, anomalies=True, results=True)
+
+            return record
 
     def _dispatch_forecast(self, batch: BatchRecord, meta: Dict[str, Any]):
         try:
@@ -309,9 +662,13 @@ class PipelineOrchestrator:
         # Stage 5a re-validation loop: rerun Stage 3 over the remediated frame so
         # an auto-fix that itself violates a rule is caught rather than trusted.
         if any(a.status == "AUTO_REMEDIATED" for a in anomalies):
+            first_pass_file = candidate_file
             clean_df, anomalies, candidate_file = self._revalidate_after_remediation(
                 clean_df, anomalies, batch_id, stored_path
             )
+            # A second pass that finds nothing writes no file; the first pass's
+            # candidates are still the Stage 4 agent's input.
+            candidate_file = candidate_file or first_pass_file
 
         self.batch_dfs[batch_id] = clean_df
         self.batch_anomalies[batch_id] = anomalies
@@ -344,6 +701,9 @@ class PipelineOrchestrator:
             self._clock_hold(batch_id)
             self._finalize_sla(batch)
             batch.updated_at = self._now()
+            # The analyst's overrides go into this frame, possibly after a
+            # restart, so it has to outlive the process.
+            self._save_working_frame(batch_id)
             return batch
 
         batch.stage = "RULE_VALIDATED"
@@ -390,6 +750,7 @@ class PipelineOrchestrator:
 
         gl_summary = self._execute_gl_matching(batch, valid_df)
         self._reconciled_batches.add(batch.batch_id)
+        self._drop_working_frame(batch.batch_id)
         batch.gl_summary = gl_summary
         batch.matched_count = gl_summary.matched_count
         batch.unmatched_count = gl_summary.unmatched_reconciling_items
@@ -472,6 +833,7 @@ class PipelineOrchestrator:
             "machine_accum": 0.0,
             "queue_accum": 0.0,
             "held_at": None,
+            "held_at_epoch": None,   # wall-clock twin of held_at; survives a restart
         }
 
     def _clock_hold(self, batch_id: str):
@@ -482,6 +844,7 @@ class PipelineOrchestrator:
         now = time.monotonic()
         c["machine_accum"] += now - c["segment_start"]
         c["held_at"] = now
+        c["held_at_epoch"] = time.time()
 
     def _clock_release(self, batch_id: str):
         """Last escalation cleared: bank the wait, machine time resumes."""
@@ -491,6 +854,7 @@ class PipelineOrchestrator:
         now = time.monotonic()
         c["queue_accum"] += now - c["held_at"]
         c["held_at"] = None
+        c["held_at_epoch"] = None
         c["segment_start"] = now
 
     def _is_parked(self, batch_id: str) -> bool:
@@ -752,13 +1116,35 @@ class PipelineOrchestrator:
         if batch_id not in self.batches:
             raise KeyError(f"Batch {batch_id} not found.")
 
+        with self._pipeline_lock:
+            try:
+                return self._resolve_escalation_locked(batch_id, anomaly_id, action, override_values, analyst_notes)
+            finally:
+                self._checkpoint(batch_id, anomalies=True, results=True)
+
+    def _resolve_escalation_locked(
+        self,
+        batch_id: str,
+        anomaly_id: str,
+        action: str,
+        override_values: Optional[Dict[str, Any]],
+        analyst_notes: Optional[str],
+    ) -> BatchRecord:
         batch = self.batches[batch_id]
         anomalies = self.batch_anomalies.get(batch_id, [])
         target = next((a for a in anomalies if a.id == anomaly_id), None)
         if not target:
             raise KeyError(f"Anomaly {anomaly_id} not found in batch {batch_id}.")
 
-        df = self.batch_dfs[batch_id]
+        df = self.batch_dfs.get(batch_id)
+        if df is None:
+            # Parked before a restart: the frame was pickled when the batch parked.
+            df = self._load_working_frame(batch_id)
+        if df is None:
+            raise ValueError(
+                f"The working data for batch {batch_id} is no longer available, so an override "
+                "cannot be applied. Re-ingest the statement."
+            )
         r_idx = target.row_index
 
         if action == "APPROVE":
@@ -827,6 +1213,9 @@ class PipelineOrchestrator:
             # SLA cost and is what the forecast is scored against.
             self._clock_release(batch_id)
             self._reconcile_and_finalize(batch, valid_df)
+        else:
+            # Still parked: keep the overridden frame durable for the next resolve.
+            self._save_working_frame(batch_id)
 
         batch.updated_at = self._now()
         return batch
@@ -938,6 +1327,8 @@ class PipelineOrchestrator:
                     batch.agent_forecast.status = "FAILED"
                     batch.agent_forecast.message = execution.message
 
+            self._checkpoint(batch_id)
+
     def refresh_agent_outputs(self, batch_id: str) -> Dict[str, AgentExecution]:
         """
         Pulls the latest execution output for every non-terminal agent job on
@@ -948,10 +1339,15 @@ class PipelineOrchestrator:
             raise KeyError(f"Batch '{batch_id}' not found.")
 
         batch = self.batches[batch_id]
+        changed = False
         for execution in list(batch.agent_executions.values()):
+            before = (execution.status, execution.output is not None)
             self._refresh_one(batch, execution)
+            changed = changed or before != (execution.status, execution.output is not None)
 
         batch.updated_at = self._now()
+        if changed:
+            self._checkpoint(batch_id)
         return batch.agent_executions
 
     def _refresh_one(self, batch: BatchRecord, execution: AgentExecution) -> bool:
@@ -1001,6 +1397,7 @@ class PipelineOrchestrator:
                 return
             try:
                 if self._refresh_one(batch, execution):
+                    self._checkpoint(batch_id)
                     return
             except Exception as e:
                 logger.warning(f"Forecast poll failed for {batch_id}: {e}")
@@ -1014,6 +1411,7 @@ class PipelineOrchestrator:
                     "the history row keeps a blank forecast rather than a guess."
                 )
                 self._attach_forecast_to_history(batch)
+                self._checkpoint(batch_id)
 
     def _capture_forecast(self, batch: BatchRecord, execution: AgentExecution):
         """Parses the agent's answer into BatchForecast and records it in the history. Idempotent."""
@@ -1209,7 +1607,19 @@ class PipelineOrchestrator:
             batch.agent_forecast = BatchForecast(status="PENDING", issued_at=self._now())
 
         self._submit_agent_job(batch_id, stage_key, artifact, resolved_agent_id, extras)
+        self._checkpoint(batch_id)
         return batch.agent_executions[stage_key]
+
+    # =========================================================================
+    # Stage 8 — publish (also the manual re-publish endpoint)
+    # =========================================================================
+    def publish(self, batch_id: str):
+        if batch_id not in self.batches:
+            raise KeyError(f"Batch '{batch_id}' not found.")
+        batch = self.batches[batch_id]
+        event = publish_service.publish_batch(batch)
+        self._checkpoint(batch_id)
+        return event
 
     def _bundle_for_stage(self, batch: BatchRecord, stage_key: str) -> Tuple[Optional[Path], List[Path]]:
         """

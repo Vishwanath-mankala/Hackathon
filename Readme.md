@@ -40,6 +40,30 @@ The agents are `CREWAI_AGENT_FORECAST_ID` (Stage 1 processing-time forecast),
 `CREWAI_AGENT_ANOMALY_ID` (Stage 4), `CREWAI_AGENT_RECON_ID` (Stage 6),
 `CREWAI_AGENT_SLA_ID` (Stage 7) and `CREWAI_AGENT_EXTRACTION_ID` (manual only).
 
+### Deploying
+
+The backend is a long-running process (background agent threads, a SQLite
+file, a 15 s startup that parses the GL cache), so it needs a real web service,
+not serverless functions. The frontend is a static Angular build.
+
+**Backend on Render.** `render.yaml` at the repo root is a Blueprint: connect
+the repo, choose *Blueprint*, and Render creates the `recon-api` web service
+with a 1 GB disk at `/var/data` and every `*_DIR` / `DB_PATH` pointed at it.
+It prompts for `CREWAI_API_KEY` and the `CREWAI_AGENT_*_ID` values; leave an
+ID blank to have that stage report `SKIPPED`. Health check is `/health`. The
+GL cache and the 65-file demo feed are tracked in git under
+`File-Gen Scripts/OutPut/`, so a fresh deploy has them. A persistent disk needs
+a paid instance; on the free tier the app still runs but starts cold on every
+deploy or restart.
+
+**Frontend on Vercel.** Import the repo with *Root Directory* set to
+`frontend`; `frontend/vercel.json` supplies the build command, the output
+directory (`dist/frontend/browser`) and the SPA rewrite. Set one environment
+variable, `API_BASE_URL`, to the Render service URL (for example
+`https://recon-api.onrender.com`) — the build reads it from the environment
+when there is no `.env`. CORS on the API is open, so no backend change is
+needed for the Vercel origin.
+
 ### Processing-time knowledge base
 
 Every completed batch is recorded in `data/forecasts/run_history.csv` with its
@@ -48,13 +72,12 @@ its throughput and queue-wait constants from that file once five batches of 200+
 rows have completed, and the forecast agent is handed a snapshot of it with every
 new batch. Two deployment consequences:
 
-- **Persistent storage.** Point `FORECAST_DIR` (and the other `*_DIR` settings in
-  `.env.example`) at a mounted volume. An ephemeral container filesystem starts
-  the history cold on every restart.
-- **One API process.** The batch registry, orchestrator and history are
-  in-memory with a file behind them. Run `uvicorn` with a single worker; several
-  workers or replicas would split batches across processes and interleave
-  history writes.
+- **Persistent storage.** Point `DB_PATH`, `FORECAST_DIR` and the other `*_DIR`
+  settings in `.env.example` at a mounted volume. An ephemeral container
+  filesystem starts the history cold on every restart.
+- **One API process.** The batch registry, orchestrator and history are an
+  in-memory cache over `data/recon.db`. Run `uvicorn` with a single worker;
+  several workers or replicas would each hold their own cache and disagree.
 
 ---
 
@@ -68,10 +91,29 @@ python -m uvicorn app.main:app --reload --port 8000
 - API Documentation: `http://localhost:8000/docs`
 - Health Check: `http://localhost:8000/health`
 
-Batches are **not** seeded. Drop a statement CSV into `incoming_sftp/` before
-starting, or upload one from the console — the pipeline runs automatically from
-ingestion through to publish. Picked-up files move to `incoming_sftp/processed/`
-so a restart does not re-ingest them.
+Batches are **not** seeded. Three ways a statement enters the pipeline, and it
+runs automatically from ingestion through to publish for each:
+
+- **Pull next feed batch** (console button, `POST /api/pipeline/simulate-sftp`)
+  takes the next file from the sample-feed queue. The queue is
+  `File-Gen Scripts/OutPut/ingestion_batches/manifest.csv` loaded into the
+  database at startup, so its position survives restarts and `--reload`: 65
+  pulls walk `ingest_batch_0001.csv` → `0065`, each with the manifest's declared
+  record count and control total going through the structural gate. Regenerate
+  the feed with `python "File-Gen Scripts/split_recon_feed.py" --input "File-Gen Scripts/BenchRec_cash_v1.0_eval.csv"`;
+  the queue picks up the new manifest on the next start (or `POST /api/pipeline/feed/reset`).
+- **Upload** from the console (`POST /api/pipeline/ingest`).
+- **Real SFTP drop**: a CSV in `incoming_sftp/` is ingested by the startup poll
+  and moved to `incoming_sftp/processed/`.
+
+**Durable state** lives in `data/recon.db` (SQLite, stdlib, no server): the
+batch registry, anomalies, match results, the feed queue and the run history.
+A restart restores every batch, rebuilds the GL cache minus the rows earlier
+batches already settled, and lets an analyst resolve a batch that was parked at
+the escalation queue before the restart — with the wait counted. Delete the
+file to start completely clean; `POST /api/pipeline/feed/reset` (the console's
+**Reset feed** button) forgets the batches and requeues the feed while keeping
+the run history and sign-off trails.
 
 ### Frontend (Angular 19)
 ```bash
