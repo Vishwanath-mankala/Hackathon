@@ -73,7 +73,7 @@ class TimeEstimate(BaseModel):
 class AgentExecution(BaseModel):
     """One dispatch of a batch artefact to an external (Aava/CrewAI) agent."""
     stage: str                      # STAGE_4_ANOMALY, STAGE_6_RECON, STAGE_7_SLA
-    agent_id: str
+    agent_id: Optional[str] = None  # None when the stage has no CREWAI_AGENT_*_ID set
     agent_name: str
     trigger: str = "AUTOMATIC"      # AUTOMATIC | MANUAL
     success: bool = False
@@ -86,6 +86,34 @@ class AgentExecution(BaseModel):
     submitted_at: Optional[str] = None
     completed_at: Optional[str] = None
     output: Optional[Any] = None
+
+
+class AuditSignoff(BaseModel):
+    """
+    One analyst decision on one reconciliation line, append-only.
+
+    A correction is recorded as a new sign-off carrying `supersedes`; the record
+    it replaces is never edited or removed, so the trail reads as the sequence of
+    calls actually made.
+    """
+    signoff_id: str
+    batch_id: str
+    dataset: str                                  # matched | unmatched_bank | outstanding_gl | ambiguous
+    row_key: str                                  # the transaction id the decision applies to
+    action: str                                   # see audit_service.valid_actions(dataset)
+    chosen_internal_txn_id: Optional[str] = None  # set when re-pointing an ambiguous tie
+    analyst: str
+    analyst_notes: Optional[str] = None
+    signed_at: str
+    supersedes: Optional[str] = None              # signoff_id this one replaces
+
+
+class SignoffRequest(BaseModel):
+    row_key: str
+    action: str
+    chosen_internal_txn_id: Optional[str] = None
+    analyst: Optional[str] = None                 # defaults to the console operator
+    analyst_notes: Optional[str] = None
 
 
 class GLMatchSummary(BaseModel):

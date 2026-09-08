@@ -363,10 +363,9 @@ export class DashboardComponent implements OnInit {
   simulateSftpDrop() {
     this.pipeline.simulateSftp().subscribe({
       next: (res) => {
-        this.toast.success(
-          'Batch ingested',
-          `${res.batch_id} ran through the pipeline. Stage: ${res.stage}`
-        );
+        // res.message states whether this came from the real dropbox or the
+        // generated sample feed — pass it through rather than paraphrasing.
+        this.toast.success('Batch ingested', res.message);
       },
       error: (err) => {
         this.toast.error('Ingestion failed', describeHttpError(err));

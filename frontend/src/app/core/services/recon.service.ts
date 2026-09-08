@@ -2,6 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable, tap } from 'rxjs';
 import { HealthResponse, PaginatedQueryResponse } from '../models/recon.models';
+import { environment } from '../../../environments/environment.generated';
 
 /**
  * System health plus paged access to a batch's Stage 6 reconciliation output.
@@ -15,7 +16,7 @@ import { HealthResponse, PaginatedQueryResponse } from '../models/recon.models';
 })
 export class ReconciliationService {
   private http = inject(HttpClient);
-  private readonly baseUrl = 'http://localhost:8000';
+  private readonly baseUrl = environment.apiBaseUrl;
 
   readonly systemHealth = signal<HealthResponse | null>(null);
 

@@ -1,6 +1,7 @@
 """
 Application Configuration.
 """
+import logging
 from pathlib import Path
 from typing import List, Optional
 from pydantic_settings import BaseSettings
@@ -45,14 +46,23 @@ class Settings(BaseSettings):
     crewai_api_url: str = "https://int-ai.aava.ai/agents/execute/agent-executions"
     crewai_retrieval_url: str = "https://int-ai.aava.ai/agents/execute/history/execution"
     crewai_api_key: Optional[str] = None
-    crewai_agent_id: str = "56800"
 
-    # Multi-Agent Specialized Role IDs
-    crewai_agent_anomaly_id: str = "56800"      # Stage 4 Anomaly Classification & Risk Scoring
-    crewai_agent_sla_id: str = "55551"          # Stage 7 SLA Analysis & Urgency Classification
-    crewai_agent_recon_id: str = "56797"        # Stage 6 Reconciliation & Exception Verification
-    crewai_agent_extraction_id: str = "56231"   # Stage 2 Ingestion & Financial Statement Data Extraction
-    crewai_agent_collab_id: str = "7723"        # Frontend Architecture Collab Agent
+    # =========================================================================
+    # Multi-Agent Role IDs
+    #
+    # There are no defaults on purpose. An agent ID is issued by the agent
+    # platform when the agent is created there — it cannot be guessed, and a
+    # wrong ID submits a batch to somebody else's agent. Set each one in .env
+    # from the platform's agent page. A stage whose ID is unset is reported as
+    # SKIPPED (not configured) and the deterministic local pipeline result
+    # stands.
+    # =========================================================================
+    crewai_agent_id: Optional[str] = None            # optional global fallback
+    crewai_agent_anomaly_id: Optional[str] = 57977   # Stage 4 Anomaly Classification & Risk Scoring
+    crewai_agent_sla_id: Optional[str] = None        # Stage 7 SLA Analysis & Urgency Classification
+    crewai_agent_recon_id: Optional[str] = None      # Stage 6 Reconciliation & Exception Verification
+    crewai_agent_extraction_id: Optional[str] = None # Stage 1 Ingestion & Statement Data Extraction
+    crewai_agent_collab_id: Optional[str] = None     # Non-pipeline developer collab agent
 
     crewai_workflow_id: Optional[str] = "reconciliation-multiagent-flow"
     crewai_timeout_seconds: float = 60.0
@@ -65,14 +75,47 @@ class Settings(BaseSettings):
     # (ARCHITECTURE.md Stage 1: "Automated directory polling for incoming SFTP drops").
     sftp_auto_ingest: bool = True
 
+    # One env file for the whole backend, at the repo root next to .env.example.
+    # It used to also load backend/.env and the CWD-relative ".env", which meant a
+    # stale copy could silently shadow the real one — see _warn_on_stray_env_files.
     model_config = {
-        "env_file": (PROJECT_ROOT / ".env", Path(__file__).resolve().parents[1] / ".env", ".env"),
+        "env_file": PROJECT_ROOT / ".env",
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
 
 
 settings = Settings()
+
+
+def _warn_on_stray_env_files() -> None:
+    """
+    Only PROJECT_ROOT/.env is read. A second file elsewhere looks like it is
+    configuring the app but is silently ignored, so say so loudly rather than
+    letting someone edit the wrong file.
+    """
+    canonical = (PROJECT_ROOT / ".env").resolve()
+    seen = {canonical}
+
+    for candidate in (PROJECT_ROOT / "backend" / ".env", Path.cwd() / ".env"):
+        try:
+            if not candidate.exists():
+                continue
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+        except OSError:
+            continue
+
+        logging.getLogger(__name__).warning(
+            "Ignoring stray env file %s — configuration is read only from %s. "
+            "Delete the stray copy to avoid confusion.",
+            resolved, canonical,
+        )
+
+
+_warn_on_stray_env_files()
 
 for _d in (
     settings.anomalies_dir,

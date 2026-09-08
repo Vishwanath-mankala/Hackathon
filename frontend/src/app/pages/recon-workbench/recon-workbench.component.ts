@@ -4,7 +4,11 @@ import { FormsModule } from '@angular/forms';
 import { PipelineService, describeHttpError } from '../../core/services/pipeline.service';
 import { ReconciliationService } from '../../core/services/recon.service';
 import { ToastService } from '../../core/services/toast.service';
-import { ArtifactKind } from '../../core/models/pipeline.models';
+import {
+  ArtifactKind,
+  AuditSignoff,
+  SignoffAction
+} from '../../core/models/pipeline.models';
 import { AsyncStateComponent } from '../../shared/components/async-state/async-state.component';
 import { SpinnerComponent } from '../../shared/components/spinner/spinner.component';
 
@@ -173,11 +177,21 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
             </div>
 
             @if (selectedBatchId()) {
-              <a [href]="exportUrl()" target="_blank" download
-                 class="bg-surface hover:bg-surface-sunken text-text-primary font-medium text-[13px] px-3 py-1.5 border border-border-default transition-colors flex items-center gap-1.5 shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-                <span>Export CSV</span>
-              </a>
+              <div class="flex items-center gap-2 shrink-0">
+                @if (signoffs().length > 0) {
+                  <a [href]="signoffTrailUrl()" target="_blank" download
+                     class="bg-surface hover:bg-surface-sunken text-text-primary font-medium text-[13px] px-3 py-1.5 border border-border-default transition-colors flex items-center gap-1.5"
+                     title="Append-only analyst decision log for this batch">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                    <span>Audit trail ({{ signoffs().length }})</span>
+                  </a>
+                }
+                <a [href]="exportUrl()" target="_blank" download
+                   class="bg-surface hover:bg-surface-sunken text-text-primary font-medium text-[13px] px-3 py-1.5 border border-border-default transition-colors flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                  <span>Export CSV</span>
+                </a>
+              </div>
             }
           </div>
 
@@ -196,6 +210,7 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
                 <thead>
                   <tr class="bg-surface-sunken text-[12px] text-text-secondary font-medium">
                     <th class="py-2 px-3 border border-border-default">Reconciliation truth</th>
+                    <th class="py-2 px-3 border border-border-default text-center">Sign-off</th>
                     @if (activeTab() === 'matched') {
                       <th class="py-2 px-3 border border-border-default">Account</th>
                       <th class="py-2 px-3 border border-border-default">Bank Txn ID</th>
@@ -239,6 +254,20 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
                           <span class="w-2 h-2" [ngClass]="truthSwatchClass(row)"></span>
                           {{ truthLabel(row) }}
                         </span>
+                      </td>
+
+                      <td class="py-2 px-3 border border-border-default text-center whitespace-nowrap">
+                        @if (signoffFor(row); as sg) {
+                          <span class="text-[10px] font-mono px-1.5 py-0.5 border"
+                                [ngClass]="signoffClass(sg.action)"
+                                [title]="sg.analyst + ' · ' + sg.signed_at">
+                            {{ signoffLabel(sg.action) }}
+                          </span>
+                        } @else if (needsSignoff()) {
+                          <span class="text-[10px] font-mono text-status-amber">AWAITING</span>
+                        } @else {
+                          <span class="text-[11px] text-text-secondary">—</span>
+                        }
                       </td>
 
                       @if (activeTab() === 'matched') {
@@ -426,14 +455,214 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
               <p class="text-[12px] text-text-primary leading-relaxed">{{ getExplanationText(row) }}</p>
             </div>
 
-            <div class="pt-3 border-t border-border-default">
+            <!-- Analyst sign-off state for this line -->
+            <div class="p-3 border text-[12px] font-mono space-y-1.5"
+                 [ngClass]="signoffFor(row)
+                   ? 'bg-[var(--status-green-bg)] border-status-green'
+                   : (needsSignoff() ? 'bg-[var(--status-amber-bg)] border-status-amber' : 'bg-surface-sunken border-border-default')">
+              <span class="text-[11px] font-semibold block"
+                    [ngClass]="signoffFor(row) ? 'text-status-green' : (needsSignoff() ? 'text-status-amber' : 'text-text-secondary')">
+                Analyst sign-off
+              </span>
+
+              @if (signoffFor(row); as sg) {
+                <div class="text-text-primary">{{ signoffLabel(sg.action) }}</div>
+                @if (sg.chosen_internal_txn_id) {
+                  <div class="text-[11px] text-text-secondary">Settled against GL {{ sg.chosen_internal_txn_id }}</div>
+                }
+                <div class="text-[11px] text-text-secondary">{{ sg.analyst }} · {{ sg.signed_at }}</div>
+                @if (sg.analyst_notes) {
+                  <div class="text-[11px] text-text-primary break-words">“{{ sg.analyst_notes }}”</div>
+                }
+                @if (sg.supersedes) {
+                  <div class="text-[10px] text-text-secondary">Supersedes {{ sg.supersedes }}</div>
+                }
+              } @else if (needsSignoff()) {
+                <div class="text-text-primary text-[11px]">
+                  This tie was not auto-settled. It needs an analyst decision before it can be treated as reconciled.
+                </div>
+              } @else {
+                <div class="text-text-secondary text-[11px]">Not yet attested.</div>
+              }
+            </div>
+
+            <div class="pt-3 border-t border-border-default flex items-center justify-between gap-2">
               <button (click)="copyAuditProof()" class="text-[12px] font-medium text-accent-action hover:underline">
                 Copy audit evidence
+              </button>
+
+              <button
+                (click)="openSignoffDialog(row)"
+                class="text-[12px] font-medium px-3 py-1.5 border transition-colors"
+                [ngClass]="signoffFor(row)
+                  ? 'bg-surface hover:bg-surface-sunken text-text-primary border-border-default'
+                  : 'bg-accent-action hover:bg-accent-action-hover text-white border-border-default'"
+              >
+                {{ signoffFor(row) ? 'Revise sign-off' : 'Sign off' }}
               </button>
             </div>
           </div>
         }
       </div>
+
+      <!-- ===================================================================
+           Analyst sign-off dialog. Records an append-only audit decision;
+           revising a call supersedes it rather than overwriting it.
+           =================================================================== -->
+      @if (signoffRow(); as row) {
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="signoff-title"
+          (click)="closeSignoffDialog()"
+        >
+          <div class="w-full max-w-[560px] bg-surface border border-border-strong shadow-lg" (click)="$event.stopPropagation()">
+            <div class="flex items-start justify-between p-4 border-b border-border-default">
+              <div class="min-w-0">
+                <h2 id="signoff-title" class="text-[15px] font-medium text-text-primary">Analyst sign-off</h2>
+                <p class="text-[12px] font-mono text-text-secondary truncate">
+                  {{ activeTabLabel() }} · {{ getRowIdentifier(row) }}
+                </p>
+              </div>
+              <button (click)="closeSignoffDialog()" class="text-text-secondary hover:text-text-primary p-1" title="Cancel">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            <div class="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+              @if (existingSignoff(); as prev) {
+                <div class="p-2.5 bg-surface-sunken border border-border-default text-[11px] font-mono space-y-0.5">
+                  <span class="text-text-secondary">Currently standing:</span>
+                  <div class="text-text-primary">{{ signoffLabel(prev.action) }} — {{ prev.analyst }} · {{ prev.signed_at }}</div>
+                  <div class="text-text-secondary">Submitting a new decision supersedes this one; it is not deleted.</div>
+                </div>
+              }
+
+              <!-- Decision -->
+              <fieldset class="space-y-2">
+                <legend class="text-[12px] text-text-secondary font-medium mb-1">Decision</legend>
+                @for (opt of signoffOptions(); track opt.action) {
+                  <label class="flex items-start gap-2.5 p-2.5 border cursor-pointer transition-colors"
+                         [ngClass]="signoffAction() === opt.action
+                           ? 'border-accent-action bg-surface-sunken'
+                           : 'border-border-default hover:bg-surface-sunken'">
+                    <input
+                      type="radio"
+                      name="signoff-action"
+                      class="mt-0.5"
+                      [value]="opt.action"
+                      [checked]="signoffAction() === opt.action"
+                      (change)="signoffAction.set(opt.action)"
+                    />
+                    <span class="min-w-0">
+                      <span class="text-[13px] text-text-primary font-medium block">{{ opt.label }}</span>
+                      <span class="text-[11px] text-text-secondary block">{{ opt.hint }}</span>
+                    </span>
+                  </label>
+                }
+              </fieldset>
+
+              <!-- Candidate picker, only for a re-pointed ambiguous tie -->
+              @if (signoffAction() === 'SELECT_ALTERNATIVE') {
+                <div class="space-y-1.5">
+                  <label class="text-[12px] text-text-secondary font-medium block">
+                    Settle against GL entry
+                  </label>
+                  @if (candidateList(row).length > 0) {
+                    <select
+                      [ngModel]="chosenCandidate()"
+                      (ngModelChange)="chosenCandidate.set($event)"
+                      class="w-full bg-surface-sunken border border-border-default text-text-primary font-mono text-[13px] px-3 py-2 focus:border-border-strong focus:outline-none"
+                    >
+                      <option [ngValue]="null" disabled>Select a candidate…</option>
+                      @for (cand of candidateList(row); track cand) {
+                        <option [ngValue]="cand">
+                          {{ cand }}{{ cand === row.chosen_internal_txn_id ? '  (engine pick)' : '' }}
+                        </option>
+                      }
+                    </select>
+                    <p class="text-[11px] font-mono text-text-secondary">
+                      Only entries that actually competed for this line are listed.
+                    </p>
+                  } @else {
+                    <p class="text-[11px] font-mono text-status-red">
+                      This tie lists no candidate GL entries, so it cannot be re-pointed.
+                    </p>
+                  }
+                </div>
+              }
+
+              <!-- Analyst -->
+              <div class="space-y-1.5">
+                <label class="text-[12px] text-text-secondary font-medium block">Signed by</label>
+                <input
+                  type="text"
+                  [ngModel]="analystName()"
+                  (ngModelChange)="analystName.set($event)"
+                  placeholder="Your name or operator ID"
+                  class="w-full bg-surface-sunken border border-border-default text-text-primary font-mono text-[13px] px-3 py-2 focus:border-border-strong focus:outline-none"
+                />
+              </div>
+
+              <!-- Notes -->
+              <div class="space-y-1.5">
+                <label class="text-[12px] text-text-secondary font-medium block">
+                  Rationale
+                  @if (notesRequired()) {
+                    <span class="text-status-amber">(required for this decision)</span>
+                  } @else {
+                    <span class="text-text-secondary">(optional)</span>
+                  }
+                </label>
+                <textarea
+                  rows="3"
+                  [ngModel]="analystNotes()"
+                  (ngModelChange)="analystNotes.set($event)"
+                  placeholder="What evidence supports this decision?"
+                  class="w-full bg-surface-sunken border border-border-default text-text-primary text-[13px] px-3 py-2 focus:border-border-strong focus:outline-none resize-y"
+                ></textarea>
+              </div>
+
+              @if (signoffError(); as err) {
+                <div class="p-3 bg-[var(--status-red-bg)] border border-status-red text-[12px] font-mono text-status-red break-words" role="alert">
+                  {{ err }}
+                </div>
+              }
+            </div>
+
+            <div class="flex items-center justify-between gap-2 p-4 border-t border-border-default bg-surface-sunken">
+              <span class="text-[11px] font-mono text-text-secondary">
+                Recorded to the batch's append-only audit trail.
+              </span>
+              <div class="flex items-center gap-2">
+                <button
+                  (click)="closeSignoffDialog()"
+                  [disabled]="submittingSignoff()"
+                  class="bg-surface hover:bg-surface-sunken text-text-primary text-[13px] font-medium px-3 py-1.5 border border-border-default transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  (click)="submitSignoff(row)"
+                  [disabled]="!canSubmitSignoff(row)"
+                  class="bg-accent-action hover:bg-accent-action-hover text-white text-[13px] font-medium px-4 py-1.5 border border-border-default transition-colors flex items-center gap-2 disabled:opacity-50"
+                >
+                  @if (submittingSignoff()) {
+                    <app-spinner [size]="13" label="Recording sign-off" />
+                    <span>Recording…</span>
+                  } @else {
+                    <span>Record sign-off</span>
+                  }
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -478,6 +707,18 @@ export class ReconWorkbenchComponent implements OnInit {
   summaryLoading = signal<boolean>(false);
   summaryError = signal<string | null>(null);
 
+  // ---- Analyst sign-off state ---------------------------------------------
+  signoffs = signal<AuditSignoff[]>([]);
+  private signoffIndex = signal<Record<string, AuditSignoff>>({});
+
+  signoffRow = signal<any | null>(null);
+  signoffAction = signal<SignoffAction | null>(null);
+  chosenCandidate = signal<string | null>(null);
+  analystName = signal<string>('');
+  analystNotes = signal<string>('');
+  submittingSignoff = signal<boolean>(false);
+  signoffError = signal<string | null>(null);
+
   private searchDebounce?: ReturnType<typeof setTimeout>;
 
   ngOnInit() {
@@ -486,6 +727,7 @@ export class ReconWorkbenchComponent implements OnInit {
         if (this.selectedBatchId()) {
           this.loadSummary();
           this.loadData();
+          this.loadSignoffs();
         }
       },
       error: () => {}
@@ -496,8 +738,211 @@ export class ReconWorkbenchComponent implements OnInit {
     this.pipeline.selectBatch(batchId);
     this.currentPage.set(1);
     this.selectedRow.set(null);
+    this.closeSignoffDialog();
     this.loadSummary();
     this.loadData();
+    this.loadSignoffs();
+  }
+
+  // =========================================================================
+  // Analyst sign-off
+  // =========================================================================
+  loadSignoffs() {
+    const id = this.selectedBatchId();
+    if (!id) {
+      this.signoffs.set([]);
+      this.signoffIndex.set({});
+      return;
+    }
+
+    this.pipeline.loadSignoffs(id, true).subscribe({
+      next: (records) => {
+        this.signoffs.set(records);
+        const index: Record<string, AuditSignoff> = {};
+        for (const r of records) {
+          index[`${r.dataset}::${r.row_key}`] = r;
+        }
+        this.signoffIndex.set(index);
+      },
+      error: () => {
+        // A batch with no trail yet is not an error state worth a banner here;
+        // the dialog surfaces any real failure when a sign-off is submitted.
+        this.signoffs.set([]);
+        this.signoffIndex.set({});
+      }
+    });
+  }
+
+  /** The row key a sign-off is recorded against, per dataset. */
+  signoffKeyFor(row: any): string {
+    return this.activeTab() === 'ambiguous'
+      ? String(row.ingest_external_txn_id ?? '')
+      : String(row.external_txn_id ?? row.internal_txn_id ?? '');
+  }
+
+  signoffFor(row: any): AuditSignoff | null {
+    const key = this.signoffKeyFor(row);
+    if (!key) return null;
+    return this.signoffIndex()[`${this.activeTab()}::${key}`] ?? null;
+  }
+
+  /** Ambiguous ties are the lines the engine refused to settle on its own. */
+  needsSignoff(): boolean {
+    return this.activeTab() === 'ambiguous';
+  }
+
+  existingSignoff(): AuditSignoff | null {
+    const row = this.signoffRow();
+    return row ? this.signoffFor(row) : null;
+  }
+
+  signoffOptions(): { action: SignoffAction; label: string; hint: string }[] {
+    if (this.activeTab() === 'ambiguous') {
+      return [
+        {
+          action: 'CONFIRM_PROVISIONAL',
+          label: 'Confirm the engine\u2019s pick',
+          hint: 'Settle against the candidate the waterfall provisionally chose.',
+        },
+        {
+          action: 'SELECT_ALTERNATIVE',
+          label: 'Settle against a different candidate',
+          hint: 'Re-point the tie to another GL entry that competed for this line.',
+        },
+        {
+          action: 'LEAVE_UNSETTLED',
+          label: 'Leave unsettled',
+          hint: 'The evidence does not separate the candidates. An unmatched item is cheaper than a wrong match.',
+        },
+      ];
+    }
+    return [
+      {
+        action: 'ATTEST_REVIEWED',
+        label: 'Attest reviewed',
+        hint: 'You have inspected this line and accept the reconciliation verdict.',
+      },
+      {
+        action: 'FLAG_FOR_INVESTIGATION',
+        label: 'Flag for investigation',
+        hint: 'Something about this line needs following up before it is accepted.',
+      },
+    ];
+  }
+
+  /** A decision that departs from the engine, or rejects a line, has to say why. */
+  notesRequired(): boolean {
+    const action = this.signoffAction();
+    return action === 'SELECT_ALTERNATIVE'
+      || action === 'LEAVE_UNSETTLED'
+      || action === 'FLAG_FOR_INVESTIGATION';
+  }
+
+  openSignoffDialog(row: any) {
+    this.signoffRow.set(row);
+    this.signoffError.set(null);
+
+    const existing = this.signoffFor(row);
+    this.signoffAction.set((existing?.action as SignoffAction) ?? this.signoffOptions()[0].action);
+    this.chosenCandidate.set(existing?.chosen_internal_txn_id ?? null);
+    this.analystName.set(existing?.analyst ?? this.analystName());
+    this.analystNotes.set('');
+  }
+
+  closeSignoffDialog() {
+    this.signoffRow.set(null);
+    this.signoffError.set(null);
+    this.submittingSignoff.set(false);
+  }
+
+  candidateList(row: any): string[] {
+    const raw = row?.candidate_internal_txn_ids;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.map((c: any) => String(c).trim()).filter(Boolean);
+    return String(raw)
+      .replace(/^\[|\]$/g, '')
+      .split(',')
+      .map(c => c.trim().replace(/^['\"]|['\"]$/g, ''))
+      .filter(Boolean);
+  }
+
+  canSubmitSignoff(row: any): boolean {
+    if (this.submittingSignoff()) return false;
+    if (!this.signoffAction()) return false;
+    if (!this.analystName().trim()) return false;
+    if (this.notesRequired() && !this.analystNotes().trim()) return false;
+    if (this.signoffAction() === 'SELECT_ALTERNATIVE' && !this.chosenCandidate()) return false;
+    return true;
+  }
+
+  submitSignoff(row: any) {
+    const batchId = this.selectedBatchId();
+    const action = this.signoffAction();
+    if (!batchId || !action) return;
+
+    const rowKey = this.signoffKeyFor(row);
+    if (!rowKey) {
+      this.signoffError.set('This row has no transaction ID to record a sign-off against.');
+      return;
+    }
+
+    this.submittingSignoff.set(true);
+    this.signoffError.set(null);
+
+    this.pipeline.recordSignoff(batchId, this.activeTab(), {
+      row_key: rowKey,
+      action,
+      chosen_internal_txn_id: action === 'SELECT_ALTERNATIVE' ? this.chosenCandidate() : null,
+      analyst: this.analystName().trim(),
+      analyst_notes: this.analystNotes().trim() || null,
+    }).subscribe({
+      next: (record) => {
+        this.submittingSignoff.set(false);
+        this.closeSignoffDialog();
+        this.loadSignoffs();
+        this.toast.success(
+          'Sign-off recorded',
+          `${this.signoffLabel(record.action)} on ${record.row_key} by ${record.analyst}.`
+        );
+      },
+      error: (err) => {
+        this.submittingSignoff.set(false);
+        this.signoffError.set(describeHttpError(err));
+      }
+    });
+  }
+
+  signoffLabel(action: string): string {
+    switch (action) {
+      case 'CONFIRM_PROVISIONAL': return 'CONFIRMED';
+      case 'SELECT_ALTERNATIVE': return 'RE-POINTED';
+      case 'LEAVE_UNSETTLED': return 'UNSETTLED';
+      case 'ATTEST_REVIEWED': return 'ATTESTED';
+      case 'FLAG_FOR_INVESTIGATION': return 'FLAGGED';
+      default: return action;
+    }
+  }
+
+  signoffClass(action: string): string {
+    switch (action) {
+      case 'CONFIRM_PROVISIONAL':
+      case 'SELECT_ALTERNATIVE':
+      case 'ATTEST_REVIEWED':
+        return 'bg-[var(--status-green-bg)] text-status-green border-status-green';
+      case 'FLAG_FOR_INVESTIGATION':
+        return 'bg-[var(--status-red-bg)] text-status-red border-status-red';
+      default:
+        return 'bg-[var(--status-amber-bg)] text-status-amber border-status-amber';
+    }
+  }
+
+  activeTabLabel(): string {
+    return this.tabs.find(t => t.key === this.activeTab())?.label ?? this.activeTab();
+  }
+
+  signoffTrailUrl(): string {
+    const id = this.selectedBatchId();
+    return id ? this.pipeline.getSignoffTrailUrl(id) : '#';
   }
 
   loadSummary() {
@@ -579,6 +1024,7 @@ export class ReconWorkbenchComponent implements OnInit {
     this.tierFilter.set(null);
     this.selectedRow.set(null);
     this.currentPage.set(1);
+    this.closeSignoffDialog();
     this.loadData();
   }
 

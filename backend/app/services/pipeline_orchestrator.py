@@ -58,6 +58,7 @@ class PipelineOrchestrator:
         self.gl_cache: Optional[pd.DataFrame] = None
         self._recon_engine = None
         self._reconciled_batches: set = set()
+        self._ingested_sources: set = set()   # resolved paths already turned into a batch
         self._lock = threading.Lock()
         self._load_gl_cache()
         self._poll_sftp_dropbox()
@@ -79,25 +80,97 @@ class PipelineOrchestrator:
 
     def _poll_sftp_dropbox(self):
         """
-        Stage 1 automated directory polling. Ingests every statement waiting in
-        incoming_sftp/. When that dropbox is empty, falls back to the generated
-        bank-statement feed so the console has live batches to work on.
+        Stage 1 automated directory polling: ingests every statement waiting in
+        incoming_sftp/ at startup.
+
+        An empty dropbox means an empty console. Nothing is ever seeded — a batch
+        exists only because a real file arrived, so what the operator sees is
+        always something that actually happened.
         """
         if not settings.sftp_auto_ingest:
             return
 
         pending = sorted(settings.sftp_dir.glob("*.csv"))
-        source = "SFTP"
-
         if not pending:
-            pending = sorted(settings.batches_dir.glob("ingest_batch_*.csv"))[:2]
-            source = "SFTP_FEED"
+            logger.info("SFTP dropbox is empty; no batches ingested at startup.")
+            return
 
         for f in pending:
             try:
-                self.ingest_batch(file_path=f, filename=f.name, source=source, auto_run_pipeline=True)
+                self.ingest_batch(file_path=f, filename=f.name, source="SFTP", auto_run_pipeline=True)
+                self._archive_sftp_file(f)
             except Exception as e:
                 logger.warning(f"SFTP auto-ingest failed for {f.name}: {e}")
+
+    def _archive_sftp_file(self, f: Path):
+        """
+        Moves a picked-up statement into incoming_sftp/processed/.
+
+        A pickup directory that is never drained would re-ingest the same file on
+        every restart, producing duplicate batches of one statement. The original
+        is moved rather than deleted so it stays recoverable, and the ingested copy
+        already lives under data/ingestion_storage/ regardless.
+        """
+        try:
+            processed_dir = settings.sftp_dir / "processed"
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            destination = processed_dir / f.name
+            if destination.exists():
+                stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+                destination = processed_dir / f"{f.stem}_{stamp}{f.suffix}"
+            shutil.move(str(f), str(destination))
+        except Exception as e:
+            logger.warning(f"Could not archive {f.name} out of the SFTP dropbox: {e}")
+
+    def pull_next_sftp_drop(self, filename: Optional[str] = None):
+        """
+        Ingests one waiting statement on demand, for an operator who does not want
+        to wait for the next restart poll.
+
+        Prefers a real file in the dropbox. Only if the dropbox is empty does it
+        fall back to the generated sample feed, and that batch is tagged
+        SAMPLE_FEED rather than SFTP so the console never presents generated data
+        as a genuine bank arrival.
+
+        Returns (batch, origin) where origin is "SFTP" or "SAMPLE_FEED".
+        """
+        if filename:
+            for candidate in (settings.sftp_dir / filename, settings.batches_dir / filename):
+                if candidate.exists():
+                    origin = "SFTP" if candidate.parent == settings.sftp_dir else "SAMPLE_FEED"
+                    batch = self.ingest_batch(
+                        file_path=candidate, filename=candidate.name, source=origin, auto_run_pipeline=True
+                    )
+                    if origin == "SFTP":
+                        self._archive_sftp_file(candidate)
+                    return batch, origin
+            raise FileNotFoundError(
+                f"'{filename}' is not in the SFTP dropbox or the generated sample feed."
+            )
+
+        waiting = sorted(settings.sftp_dir.glob("*.csv"))
+        if waiting:
+            target = waiting[0]
+            batch = self.ingest_batch(
+                file_path=target, filename=target.name, source="SFTP", auto_run_pipeline=True
+            )
+            self._archive_sftp_file(target)
+            return batch, "SFTP"
+
+        # Dropbox empty — offer the next generated sample not already ingested,
+        # so repeated clicks walk the feed instead of re-ingesting one file.
+        for sample in sorted(settings.batches_dir.glob("ingest_batch_*.csv")):
+            if str(sample.resolve()) in self._ingested_sources:
+                continue
+            batch = self.ingest_batch(
+                file_path=sample, filename=sample.name, source="SAMPLE_FEED", auto_run_pipeline=True
+            )
+            return batch, "SAMPLE_FEED"
+
+        raise FileNotFoundError(
+            "No statement waiting in incoming_sftp/, and every generated sample batch "
+            "has already been ingested. Drop a file into incoming_sftp/ or upload one."
+        )
 
     # =========================================================================
     # Stage 1 — Ingestion
@@ -148,6 +221,8 @@ class PipelineOrchestrator:
         self.batches[batch_id] = record
         self.batch_dfs[batch_id] = df
         self.batch_anomalies[batch_id] = []
+        if file_path is not None:
+            self._ingested_sources.add(str(Path(file_path).resolve()))
 
         if auto_run_pipeline:
             self.run_pipeline(batch_id, stored_path, meta)
@@ -595,6 +670,14 @@ class PipelineOrchestrator:
         )
         batch.agent_executions[stage_key] = execution
 
+        if not agent.get("configured"):
+            execution.status = "SKIPPED"
+            execution.message = (
+                f"No agent ID configured for this stage. Set {agent['key']} in .env "
+                "to the ID issued by the agent platform."
+            )
+            return
+
         if not settings.auto_agent_dispatch or not agent.get("auto_dispatch"):
             execution.status = "SKIPPED"
             execution.message = "Automatic dispatch disabled for this agent."
@@ -696,7 +779,13 @@ class PipelineOrchestrator:
         if not agent:
             raise KeyError(f"No agent configured for stage '{stage_key}'.")
 
-        resolved_agent_id = str(agent_id or agent["id"])
+        resolved_agent_id = agent_id or agent["id"]
+        if not resolved_agent_id:
+            raise ValueError(
+                f"No agent ID configured for stage '{stage_key}'. Set {agent['key']} in .env, "
+                "or pass agent_id explicitly."
+            )
+        resolved_agent_id = str(resolved_agent_id)
         execution = AgentExecution(
             stage=stage_key,
             agent_id=resolved_agent_id,

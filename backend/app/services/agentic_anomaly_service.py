@@ -41,7 +41,7 @@ class CrewAIAgentBridge:
         self.api_url = api_url or settings.crewai_api_url
         self.retrieval_url = retrieval_url or settings.crewai_retrieval_url
         self.api_key = api_key or settings.crewai_api_key
-        self.agent_id = str(agent_id or settings.crewai_agent_id or "7723")
+        self.agent_id = str(agent_id or settings.crewai_agent_id or "") or None
         self.timeout = timeout or settings.crewai_timeout_seconds
         self.enabled = settings.crewai_enabled or bool(self.api_url)
 
@@ -91,16 +91,21 @@ class CrewAIAgentBridge:
 
     def get_configured_agents(self) -> List[Dict[str, Any]]:
         """
-        Returns the multi-agent roster wired into the pipeline. `stage_key`
-        is the orchestrator hook the agent is dispatched from; agents with
-        `auto_dispatch=False` are never fired by the pipeline.
+        Returns the multi-agent roster wired into the pipeline.
+
+        `id` is whatever the corresponding CREWAI_AGENT_*_ID environment variable
+        holds — there is no built-in default, because an agent ID is issued by the
+        platform and cannot be guessed. `configured` is False when that variable is
+        unset, in which case the stage is skipped rather than submitted blind.
+        `stage_key` is the orchestrator hook the agent is dispatched from; agents
+        with `auto_dispatch=False` are never fired by the pipeline.
         """
-        return [
+        roster = [
             {
-                "id": str(settings.crewai_agent_anomaly_id),
                 "key": "CREWAI_AGENT_ANOMALY_ID",
+                "id": settings.crewai_agent_anomaly_id,
                 "stage_key": "STAGE_4_ANOMALY",
-                "name": "Enterprise Risk & Anomaly Detection Engine A5",
+                "name": "Enterprise Risk & Anomaly Detection Engine",
                 "role": "Senior Enterprise Risk Analytics Specialist",
                 "stage": "Stage 4: Anomaly Classification & Severity Scoring",
                 "description": "Classifies Structural, Semantic, Timing and Referential anomaly candidates and assigns risk severity scores.",
@@ -110,8 +115,8 @@ class CrewAIAgentBridge:
                 "is_default": True,
             },
             {
-                "id": str(settings.crewai_agent_recon_id),
                 "key": "CREWAI_AGENT_RECON_ID",
+                "id": settings.crewai_agent_recon_id,
                 "stage_key": "STAGE_6_RECON",
                 "name": "Verification Reconciliation & Exception Specialist",
                 "role": "Senior Exception Management Specialist",
@@ -123,8 +128,8 @@ class CrewAIAgentBridge:
                 "is_default": False,
             },
             {
-                "id": str(settings.crewai_agent_sla_id),
                 "key": "CREWAI_AGENT_SLA_ID",
+                "id": settings.crewai_agent_sla_id,
                 "stage_key": "STAGE_7_SLA",
                 "name": "SLA Analysis & Urgency Classifier",
                 "role": "Senior SLA Compliance Analyst Agent",
@@ -136,8 +141,8 @@ class CrewAIAgentBridge:
                 "is_default": False,
             },
             {
-                "id": str(settings.crewai_agent_extraction_id),
                 "key": "CREWAI_AGENT_EXTRACTION_ID",
+                "id": settings.crewai_agent_extraction_id,
                 "stage_key": "STAGE_1_EXTRACTION",
                 "name": "Financial Statement Extraction & Traceability",
                 "role": "Senior Financial Data Extraction Engineer",
@@ -149,8 +154,8 @@ class CrewAIAgentBridge:
                 "is_default": False,
             },
             {
-                "id": str(settings.crewai_agent_collab_id),
                 "key": "CREWAI_AGENT_COLLAB_ID",
+                "id": settings.crewai_agent_collab_id,
                 "stage_key": "NON_PIPELINE",
                 "name": "Frontend Architecture Collab Agent",
                 "role": "Collab & Orchestration Agent",
@@ -162,6 +167,12 @@ class CrewAIAgentBridge:
                 "is_default": False,
             },
         ]
+
+        for agent in roster:
+            agent["id"] = str(agent["id"]) if agent["id"] else None
+            agent["configured"] = agent["id"] is not None
+
+        return roster
 
     def get_agent_for_stage(self, stage_key: str) -> Optional[Dict[str, Any]]:
         return next((a for a in self.get_configured_agents() if a["stage_key"] == stage_key), None)
@@ -179,7 +190,20 @@ class CrewAIAgentBridge:
                 "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             }
 
-        target_agent_id = str(agent_id or settings.crewai_agent_anomaly_id or self.agent_id or "56800")
+        target_agent_id = agent_id or self.agent_id
+        if not target_agent_id:
+            return {
+                "success": False,
+                "message": (
+                    "No agent ID supplied and no fallback configured. Set the stage's "
+                    "CREWAI_AGENT_*_ID in .env to the ID issued by the agent platform."
+                ),
+                "http_status": "NOT_CONFIGURED",
+                "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "target_file": file_path.name,
+                "agent_id": None,
+            }
+        target_agent_id = str(target_agent_id)
         headers = {
             "Authorization": f"Bearer {self.api_key or ''}",
             "Accept": "application/json, text/plain, */*",
@@ -311,7 +335,7 @@ class AgenticAnomalyService:
         self.crewai_api_url = crewai_api_url or settings.crewai_api_url
         self.crewai_retrieval_url = crewai_retrieval_url or settings.crewai_retrieval_url
         self.crewai_api_key = crewai_api_key or settings.crewai_api_key
-        self.crewai_agent_id = str(crewai_agent_id or settings.crewai_agent_id or "7723")
+        self.crewai_agent_id = crewai_agent_id or settings.crewai_agent_id
         self.agent_bridge = CrewAIAgentBridge(
             api_url=self.crewai_api_url,
             retrieval_url=self.crewai_retrieval_url,

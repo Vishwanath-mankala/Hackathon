@@ -61,6 +61,11 @@ data/batch_results/*
 !data/batch_results/.gitkeep
 data/sla_metrics/*
 !data/sla_metrics/.gitkeep
+incoming_sftp/*.csv
+incoming_sftp/processed/
+
+# Generated from .env at build time — config lives in .env, not here
+frontend/src/environments/environment.generated.ts
 File-Gen Scripts/OutPut/
 
 # =============================================================================

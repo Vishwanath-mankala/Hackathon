@@ -198,9 +198,15 @@ def test_file_downloads_and_agent_integration():
     assert "STAGE_4_ANOMALY" in executions
     stage_4 = executions["STAGE_4_ANOMALY"]
     assert stage_4["trigger"] == "AUTOMATIC"
-    assert stage_4["agent_id"] == str(settings.crewai_agent_anomaly_id)
-    # SUBMITTED/SUBMITTING when the platform is reachable, SKIPPED when it is not.
+    # The agent ID comes from the environment; there is no built-in default.
+    configured_id = settings.crewai_agent_anomaly_id
+    assert stage_4["agent_id"] == (str(configured_id) if configured_id else None)
+    # SUBMITTED/SUBMITTING when the platform is reachable and an ID is set,
+    # SKIPPED when the stage has no agent ID configured.
     assert stage_4["status"] in {"SUBMITTING", "SUBMITTED", "FAILED", "SKIPPED"}
+    if not configured_id:
+        assert stage_4["status"] == "SKIPPED"
+        assert "CREWAI_AGENT_ANOMALY_ID" in (stage_4["message"] or "")
 
     # 5. Global agent health
     global_agent = client.get("/api/pipeline/agent/status")
@@ -211,10 +217,18 @@ def test_file_downloads_and_agent_integration():
         f"/api/pipeline/batches/{batch_id}/agent/classify",
         params={"stage_key": "STAGE_4_ANOMALY"},
     )
-    assert classify_res.status_code == 200
-    res_json = classify_res.json()
-    assert res_json["trigger"] == "MANUAL"
-    assert res_json["stage"] == "STAGE_4_ANOMALY"
+
+    if not configured_id:
+        # Without an agent ID this is a configuration problem, not a server
+        # fault, and the response has to name the variable to set.
+        assert classify_res.status_code == 400
+        assert "CREWAI_AGENT_ANOMALY_ID" in classify_res.json()["detail"]
+        res_json = {}
+    else:
+        assert classify_res.status_code == 200
+        res_json = classify_res.json()
+        assert res_json["trigger"] == "MANUAL"
+        assert res_json["stage"] == "STAGE_4_ANOMALY"
 
     # 7. Poll the platform for outputs on every in-flight execution
     output_res = client.get(f"/api/pipeline/batches/{batch_id}/agent/output")
@@ -230,3 +244,100 @@ def test_file_downloads_and_agent_integration():
 
 
 
+
+
+def test_analyst_signoff_audit_trail():
+    """
+    Stage 6 ambiguous ties need a human decision. Verify the sign-off is
+    validated, persisted, and append-only (a revision supersedes rather than
+    overwrites).
+    """
+    from app.services.pipeline_orchestrator import pipeline_orchestrator
+
+    def find_tie():
+        for batch in pipeline_orchestrator.batches.values():
+            ties = (pipeline_orchestrator.batch_match_results.get(batch.batch_id) or {}).get("ambiguous") or []
+            if ties:
+                return batch.batch_id, ties[0]
+        return None
+
+    # Nothing is seeded at startup, so pull real statements through the pipeline
+    # until one produces an ambiguous tie to sign off on.
+    target = find_tie()
+    for _ in range(5):
+        if target:
+            break
+        res = client.post("/api/pipeline/simulate-sftp")
+        if res.status_code != 200:
+            break
+        target = find_tie()
+
+    if target is None:
+        pytest.skip("No batch produced an ambiguous tie to sign off on.")
+
+    batch_id, tie = target
+    row_key = str(tie["ingest_external_txn_id"])
+    candidates = [str(c) for c in tie["candidate_internal_txn_ids"]]
+
+    def sign(payload, dataset="ambiguous"):
+        return client.post(f"/api/pipeline/batches/{batch_id}/recon/{dataset}/signoff", json=payload)
+
+    # A GL entry that never competed for this line must be rejected — settling
+    # against it would hide two errors instead of surfacing one.
+    bad = sign({
+        "row_key": row_key,
+        "action": "SELECT_ALTERNATIVE",
+        "chosen_internal_txn_id": "NOT-A-CANDIDATE-999",
+    })
+    assert bad.status_code == 400
+    assert "not a candidate" in bad.json()["detail"].lower()
+
+    # SELECT_ALTERNATIVE without a target is rejected.
+    assert sign({"row_key": row_key, "action": "SELECT_ALTERNATIVE"}).status_code == 400
+
+    # An attestation action is not valid for an ambiguous tie.
+    assert sign({"row_key": row_key, "action": "ATTEST_REVIEWED"}).status_code == 400
+
+    # An unknown tie is a 404.
+    assert sign({"row_key": "NO-SUCH-TXN", "action": "LEAVE_UNSETTLED"}).status_code == 404
+
+    # Confirming the engine's provisional pick.
+    first = sign({
+        "row_key": row_key,
+        "action": "CONFIRM_PROVISIONAL",
+        "analyst": "test.analyst",
+        "analyst_notes": "reference tokens agree",
+    })
+    assert first.status_code == 200
+    first_json = first.json()
+    assert first_json["chosen_internal_txn_id"] == str(tie["chosen_internal_txn_id"])
+    assert first_json["supersedes"] is None
+
+    # Revising the call supersedes it; the original record survives.
+    second = sign({
+        "row_key": row_key,
+        "action": "SELECT_ALTERNATIVE",
+        "chosen_internal_txn_id": candidates[-1],
+        "analyst": "test.analyst",
+        "analyst_notes": "narrative matches the later candidate",
+    })
+    assert second.status_code == 200
+    assert second.json()["supersedes"] == first_json["signoff_id"]
+    assert second.json()["chosen_internal_txn_id"] == candidates[-1]
+
+    trail = client.get(f"/api/pipeline/batches/{batch_id}/signoffs").json()
+    trail_for_row = [s for s in trail if s["row_key"] == row_key]
+    assert len(trail_for_row) >= 2, "the superseded decision must still be in the trail"
+
+    effective = client.get(
+        f"/api/pipeline/batches/{batch_id}/signoffs",
+        params={"effective_only": True},
+    ).json()
+    standing = [s for s in effective if s["row_key"] == row_key]
+    assert len(standing) == 1
+    assert standing[0]["signoff_id"] == second.json()["signoff_id"]
+
+    # The trail is downloadable as CSV evidence.
+    csv_res = client.get(f"/api/pipeline/batches/{batch_id}/signoffs/file")
+    assert csv_res.status_code == 200
+    assert b"signoff_id" in csv_res.content

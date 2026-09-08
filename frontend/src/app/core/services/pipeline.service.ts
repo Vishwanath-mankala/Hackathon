@@ -13,9 +13,12 @@ import {
   AgentExecution,
   AgentStatusResponse,
   ArtifactKind,
+  AuditSignoff,
   BatchReconResponse,
-  ConfiguredAgent
+  ConfiguredAgent,
+  SignoffRequest
 } from '../models/pipeline.models';
+import { environment } from '../../../environments/environment.generated';
 
 /** Turns any transport/HTTP failure into a message worth showing an operator. */
 export function describeHttpError(err: unknown): string {
@@ -24,7 +27,7 @@ export function describeHttpError(err: unknown): string {
     return typeof e.error.detail === 'string' ? e.error.detail : JSON.stringify(e.error.detail);
   }
   if (e?.status === 0) {
-    return 'Backend unreachable at http://localhost:8000 — the API is not responding.';
+    return `Backend unreachable at ${environment.apiBaseUrl} — the API is not responding.`;
   }
   if (e?.status) {
     return `API returned HTTP ${e.status} ${e.statusText || ''}`.trim();
@@ -37,7 +40,7 @@ export function describeHttpError(err: unknown): string {
 })
 export class PipelineService {
   private http = inject(HttpClient);
-  private readonly baseUrl = 'http://localhost:8000/api/pipeline';
+  private readonly baseUrl = `${environment.apiBaseUrl}/api/pipeline`;
 
   // ---- Data state (populated only from API responses) -----------------------
   readonly overview = signal<PipelineOverview | null>(null);
@@ -306,6 +309,28 @@ export class PipelineService {
     return this.http.get<ConfiguredAgent[]>(`${this.baseUrl}/agent/available-agents`).pipe(
       tap(agents => this.configuredAgents.set(agents))
     );
+  }
+
+  // --------------------------------------------------------------------------
+  // Analyst sign-off & audit trail
+  //
+  // Stage 6 leaves ambiguous ties and reconciling items for a person to decide.
+  // Sign-offs are append-only: a correction supersedes, it never overwrites.
+  // --------------------------------------------------------------------------
+  loadSignoffs(batchId: string, effectiveOnly: boolean = false): Observable<AuditSignoff[]> {
+    const params = new HttpParams().set('effective_only', effectiveOnly.toString());
+    return this.http.get<AuditSignoff[]>(`${this.baseUrl}/batches/${batchId}/signoffs`, { params });
+  }
+
+  recordSignoff(batchId: string, dataset: string, req: SignoffRequest): Observable<AuditSignoff> {
+    return this.http.post<AuditSignoff>(
+      `${this.baseUrl}/batches/${batchId}/recon/${dataset}/signoff`,
+      req
+    );
+  }
+
+  getSignoffTrailUrl(batchId: string): string {
+    return `${this.baseUrl}/batches/${batchId}/signoffs/file`;
   }
 
   // --------------------------------------------------------------------------

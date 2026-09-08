@@ -15,13 +15,30 @@ in `.env` (default `true`).
 
 ## 1. Roster at a glance
 
-| Agent ID | Name | Stage hook | Trigger | Input artefact | Backend generates it? | Human intervention |
-|:---------|:-----|:-----------|:--------|:---------------|:----------------------|:-------------------|
-| **56800** | Enterprise Risk & Anomaly Detection Engine A5 | `STAGE_4_ANOMALY` | Automatic | `{batch_id}_candidates.csv` | ✅ Yes | ❌ No |
-| **56797** | Verification Reconciliation & Exception Specialist | `STAGE_6_RECON` | Automatic | `{batch_id}_recon_exceptions.csv` | ✅ Yes | ⚠️ Yes — analyst signs off ambiguous tie-breaks |
-| **55551** | SLA Analysis & Urgency Classifier | `STAGE_7_SLA` | Automatic | `{batch_id}_sla_metrics.csv` | ✅ Yes | ❌ No |
-| **56231** | Financial Statement Extraction & Traceability | `STAGE_1_EXTRACTION` | Manual only | `{batch_id}_{filename}` (raw statement) | ✅ Yes | ❌ No |
-| **7723** | Frontend Architecture Collab Agent | `NON_PIPELINE` | Never (dev tool) | `uiux.json` | ❌ No | ✅ Yes — human-authored input |
+| Agent | Env var | Stage hook | Trigger | Input artefact | Backend generates it? | Human intervention |
+|:------|:--------|:-----------|:--------|:---------------|:----------------------|:-------------------|
+| Enterprise Risk & Anomaly Detection Engine | `CREWAI_AGENT_ANOMALY_ID` | `STAGE_4_ANOMALY` | Automatic | `{batch_id}_candidates.csv` | ✅ Yes | ❌ No |
+| Verification Reconciliation & Exception Specialist | `CREWAI_AGENT_RECON_ID` | `STAGE_6_RECON` | Automatic | `{batch_id}_recon_exceptions.csv` | ✅ Yes | ⚠️ Yes — analyst signs off ambiguous tie-breaks |
+| SLA Analysis & Urgency Classifier | `CREWAI_AGENT_SLA_ID` | `STAGE_7_SLA` | Automatic | `{batch_id}_sla_metrics.csv` | ✅ Yes | ❌ No |
+| Financial Statement Extraction & Traceability | `CREWAI_AGENT_EXTRACTION_ID` | `STAGE_1_EXTRACTION` | Manual only | `{batch_id}_{filename}` (raw statement) | ✅ Yes | ❌ No |
+| Frontend Architecture Collab Agent | `CREWAI_AGENT_COLLAB_ID` | `NON_PIPELINE` | Never (dev tool) | `uiux.json` | ❌ No | ✅ Yes — human-authored input |
+
+### Agent IDs
+
+**This document contains no agent IDs, and the code ships no defaults.** An agent
+ID is issued by the platform when you create the agent there — it cannot be
+guessed, and a wrong one submits your batch data to somebody else's agent.
+
+Create each agent on the platform using the prompt in section 2, copy the ID from
+its page, and set the matching `CREWAI_AGENT_*_ID` in `.env`. A stage whose ID is
+blank is reported as `SKIPPED — no agent ID configured` and the deterministic local
+pipeline result stands, so an unconfigured deployment still runs end to end.
+
+Check what is wired up at any time:
+
+```
+GET /api/pipeline/agent/available-agents   # each entry carries `configured: true|false`
+```
 
 ### Why is there no Stage 5 agent?
 
@@ -39,11 +56,12 @@ are places where an LLM's judgement is the wrong instrument:
 
 The advisory work an agent *could* usefully do here — ranking the escalation
 queue, judging whether a suggested fix is safe to apply — is already produced one
-stage earlier by **Agent 56800**, whose per-row output carries `fix_is_lossless`
-and `recommended_action` (`AUTO_REMEDIATE` / `ESCALATE_TO_ANALYST` /
-`QUARANTINE_ROW`). Stage 5 consumes that judgement rather than re-requesting it.
+stage earlier by the **anomaly agent**, whose per-row output carries
+`fix_is_lossless` and `recommended_action` (`AUTO_REMEDIATE` /
+`ESCALATE_TO_ANALYST` / `QUARANTINE_ROW`). Stage 5 consumes that judgement rather
+than re-requesting it.
 
-> Historical note: `CREWAI_AGENT_SLA_ID` (55551) was previously labelled "Stage 5"
+> Historical note: `CREWAI_AGENT_SLA_ID` was previously labelled "Stage 5"
 > in `.env` and the service comments. That was a mislabel — SLA estimation is
 > **Stage 7** in ARCHITECTURE.md, and that is the hook it is wired to
 > (`STAGE_7_SLA`). The labels have been corrected; the agent never ran at Stage 5.
@@ -62,15 +80,15 @@ agent gate:
    `APPROVE`, `OVERRIDE` or `QUARANTINE`. Clearing the last item automatically
    runs Stages 6 → 8 with no further input.
 
-2. **Agent 56797 — ambiguous tie-break advisory.** The agent *runs* without a
-   human, but its recommended tie-breaks are advisory. An ambiguous tie is a case
-   where several GL rows match the same bank line equally well; the engine
-   deliberately refuses to auto-settle it. An analyst confirms or overrides in
-   the reconciliation workbench.
+2. **Stage 6 — ambiguous tie sign-off.** The recon agent *runs* without a human,
+   but its tie-breaks are advisory. An ambiguous tie is a case where several GL
+   rows match the same bank line equally well; the engine deliberately refuses to
+   auto-settle it. An analyst confirms, re-points or leaves the tie unsettled in
+   the reconciliation workbench — see section 4.
 
-Agents **56800**, **55551** and **56231** are fully autonomous — they classify
-and score, they never gate the pipeline, and a failed dispatch degrades the
-batch to the deterministic local result rather than stalling it.
+The anomaly, SLA and extraction agents are fully autonomous — they classify and
+score, they never gate the pipeline, and a failed dispatch degrades the batch to
+the deterministic local result rather than stalling it.
 
 ---
 
@@ -85,17 +103,17 @@ Task / Expected-output text to paste into the CrewAI (Aava) agent builder.
 > and output contract has to live in its platform configuration. If you change a
 > prompt's output shape, update the **Output** row here to match.
 
-### Agent 56800 — Enterprise Risk & Anomaly Detection Engine A5
+### Anomaly agent — Enterprise Risk & Anomaly Detection Engine
 
 | Property | Value |
 |:---------|:------|
-| **Env var** | `CREWAI_AGENT_ANOMALY_ID=56800` |
+| **Env var** | `CREWAI_AGENT_ANOMALY_ID` (no default — set it from the platform) |
 | **Stage hook** | `STAGE_4_ANOMALY` — Agentic Anomaly Scorer & Classifier |
 | **Trigger** | Automatic, immediately after the Stage 3 rule engine writes the candidates file |
 | **Dispatched from** | `PipelineOrchestrator.run_pipeline()` → `_dispatch_agent_async(batch, "STAGE_4_ANOMALY", …)` |
 | **Input file** | `File-Gen Scripts/OutPut/anomalies/{batch_id}_candidates.csv` |
 | **Backend generates it?** | ✅ `agentic_anomaly_service.evaluate_batch()` writes both `.csv` and `.json` |
-| **Skipped when** | The batch has zero anomalies — nothing to classify |
+| **Skipped when** | The batch has zero anomalies, or `CREWAI_AGENT_ANOMALY_ID` is unset |
 | **Human intervention** | ❌ None |
 
 **Input schema** (`{batch_id}_candidates.csv`):
@@ -256,17 +274,17 @@ A single JSON object, no prose outside it, no markdown fences:
 
 ---
 
-### Agent 56797 — Verification Reconciliation & Exception Specialist
+### Recon agent — Verification Reconciliation & Exception Specialist
 
 | Property | Value |
 |:---------|:------|
-| **Env var** | `CREWAI_AGENT_RECON_ID=56797` |
+| **Env var** | `CREWAI_AGENT_RECON_ID` (no default — set it from the platform) |
 | **Stage hook** | `STAGE_6_RECON` — GL Reconciliation Exception Review |
 | **Trigger** | Automatic, after the 4-tier waterfall finishes and exports its artefacts |
 | **Dispatched from** | `PipelineOrchestrator._reconcile_and_finalize()` |
 | **Input file** | `data/batch_results/{batch_id}_recon_exceptions.csv` |
 | **Backend generates it?** | ✅ `_export_recon_artifacts()` |
-| **Skipped when** | The waterfall settled everything — no exceptions to review |
+| **Skipped when** | The waterfall settled everything, or `CREWAI_AGENT_RECON_ID` is unset |
 | **Human intervention** | ⚠️ Advisory: an analyst confirms or overrides the agent's tie-breaks |
 
 **Input schema** (`{batch_id}_recon_exceptions.csv`) — a union of two exception
@@ -434,11 +452,11 @@ A single JSON object, no prose outside it, no markdown fences:
 
 ---
 
-### Agent 55551 — SLA Analysis & Urgency Classifier
+### SLA agent — SLA Analysis & Urgency Classifier
 
 | Property | Value |
 |:---------|:------|
-| **Env var** | `CREWAI_AGENT_SLA_ID=55551` |
+| **Env var** | `CREWAI_AGENT_SLA_ID` (no default — set it from the platform) |
 | **Stage hook** | `STAGE_7_SLA` — Processing Time & SLA Estimator |
 | **Trigger** | Automatic, after the actual run duration is recorded |
 | **Dispatched from** | `PipelineOrchestrator._finalize_sla()` |
@@ -586,11 +604,11 @@ A single JSON object, no prose outside it, no markdown fences:
 
 ---
 
-### Agent 56231 — Financial Statement Extraction & Traceability
+### Extraction agent — Financial Statement Extraction & Traceability
 
 | Property | Value |
 |:---------|:------|
-| **Env var** | `CREWAI_AGENT_EXTRACTION_ID=56231` |
+| **Env var** | `CREWAI_AGENT_EXTRACTION_ID` (no default — set it from the platform) |
 | **Stage hook** | `STAGE_1_EXTRACTION` — Ingestion & Field Extraction |
 | **Trigger** | **Manual only** (`auto_dispatch: false`) |
 | **Input file** | `data/ingestion_storage/{batch_id}_{filename}` |
@@ -605,6 +623,8 @@ proprietary layout. Fire it with:
 ```
 POST /api/pipeline/batches/{batch_id}/agent/classify?stage_key=STAGE_1_EXTRACTION
 ```
+
+Returns `400` naming the variable to set if `CREWAI_AGENT_EXTRACTION_ID` is blank.
 
 **Output**: extracted fields mapped to the canonical schema, per-field confidence
 scores, source line references for audit evidence.
@@ -731,16 +751,21 @@ A single JSON object, no prose outside it, no markdown fences:
 
 ---
 
-### Agent 7723 — Frontend Architecture Collab Agent
+### Collab agent — Frontend Architecture Collab Agent
 
-Cross-cutting developer tool. **Not part of the batch pipeline** and never
-dispatched by the orchestrator. Input (`uiux.json` plus tech-stack preferences)
-is human-authored; the backend generates nothing for it.
+| Property | Value |
+|:---------|:------|
+| **Env var** | `CREWAI_AGENT_COLLAB_ID` (no default — set it from the platform) |
+| **Stage hook** | `NON_PIPELINE` — never dispatched by the orchestrator |
+| **Trigger** | Never. This is a developer tool, not a pipeline step |
+| **Input file** | `uiux.json` plus tech-stack preferences, human-authored |
+| **Backend generates it?** | ❌ No |
+| **Human intervention** | ✅ Yes — the input is written by a person |
 
 No platform prompt is documented here: this agent is configured ad hoc by whoever
 is using it, its output is read by a developer rather than parsed by the pipeline,
 and nothing in the backend depends on its response shape. Do not wire it to a
-`stage_key` — the orchestrator treats `NON_PIPELINE` as never-dispatch.
+pipeline `stage_key` — the orchestrator treats `NON_PIPELINE` as never-dispatch.
 
 ---
 
@@ -748,15 +773,16 @@ and nothing in the backend depends on its response shape. Do not wire it to a
 
 | Artefact | Path | Written by | Consumed by |
 |:---------|:-----|:-----------|:------------|
-| Raw statement | `data/ingestion_storage/{batch_id}_{filename}` | `ingestion_service.ingest_file()` | Stage 2 gate, Agent 56231 |
+| Raw statement | `data/ingestion_storage/{batch_id}_{filename}` | `ingestion_service.ingest_file()` | Stage 2 gate, extraction agent |
 | Quarantined file | `data/quarantined_batches/{filename}` | `_execute_structural_gate()` | Compliance review |
-| Anomaly candidates | `File-Gen Scripts/OutPut/anomalies/{batch_id}_candidates.csv` / `.json` | `evaluate_batch()` | Agent 56800 |
+| Anomaly candidates | `File-Gen Scripts/OutPut/anomalies/{batch_id}_candidates.csv` / `.json` | `evaluate_batch()` | **Anomaly agent** |
 | Matched pairs | `data/batch_results/{batch_id}_matched.csv` | `_export_recon_artifacts()` | Workbench, audit |
 | Bank-only items | `data/batch_results/{batch_id}_unmatched_bank.csv` | `_export_recon_artifacts()` | Workbench, audit |
 | GL-only items | `data/batch_results/{batch_id}_outstanding_gl.csv` | `_export_recon_artifacts()` | Workbench, audit |
 | Ambiguous ties | `data/batch_results/{batch_id}_ambiguous.csv` | `_export_recon_artifacts()` | Workbench, audit |
-| Recon exceptions | `data/batch_results/{batch_id}_recon_exceptions.csv` | `_export_recon_artifacts()` | **Agent 56797** |
-| SLA metrics | `data/sla_metrics/{batch_id}_sla_metrics.csv` | `export_sla_metrics()` | **Agent 55551** |
+| Recon exceptions | `data/batch_results/{batch_id}_recon_exceptions.csv` | `_export_recon_artifacts()` | **Recon agent** |
+| SLA metrics | `data/sla_metrics/{batch_id}_sla_metrics.csv` | `export_sla_metrics()` | **SLA agent** |
+| Analyst sign-offs | `data/batch_results/{batch_id}_signoffs.csv` | `audit_service.record()` | Auditor, workbench |
 
 Every one is downloadable through
 `GET /api/pipeline/batches/{batch_id}/artifacts/{kind}`, where `kind` is one of
@@ -765,13 +791,62 @@ Every one is downloadable through
 
 **Cross-check result: every auto-dispatched agent has its input file generated by
 the backend.** The two gaps that previously blocked full automation —
-`{batch_id}_sla_metrics.csv` for Agent 55551 and the Stage 6 exception export for
-Agent 56797 — are now written by `time_estimator_service.export_sla_metrics()`
+`{batch_id}_sla_metrics.csv` for the SLA agent and the Stage 6 exception export for
+the recon agent — are now written by `time_estimator_service.export_sla_metrics()`
 and `PipelineOrchestrator._export_recon_artifacts()` respectively.
 
 ---
 
-## 4. Dispatch mechanics
+## 4. Analyst sign-off & audit trail
+
+The recon agent's tie-breaks are advisory, so the decision has to be recorded
+against a person. Sign-off is **append-only**: revising a call writes a new record
+carrying `supersedes`, and the record it replaces is never edited or deleted. The
+trail is what an auditor reads to see the sequence of calls actually made.
+
+Every write is flushed to `data/batch_results/{batch_id}_signoffs.csv`, so the
+trail survives a restart and can be handed over as-is.
+
+### Actions
+
+| Dataset | Valid actions | Meaning |
+|:--------|:--------------|:--------|
+| `ambiguous` | `CONFIRM_PROVISIONAL` | Settle against the candidate the waterfall provisionally chose |
+| | `SELECT_ALTERNATIVE` | Re-point the tie to another candidate — **must** be one of that tie's own `candidate_internal_txn_ids` |
+| | `LEAVE_UNSETTLED` | The evidence does not separate the candidates; an unmatched item is cheaper than a wrong match |
+| `matched`, `unmatched_bank`, `outstanding_gl` | `ATTEST_REVIEWED` | The analyst has inspected the line and accepts the verdict |
+| | `FLAG_FOR_INVESTIGATION` | Needs following up before it is accepted |
+
+The candidate check is enforced server-side and returns `400` listing the entries
+that actually competed. Settling a bank line against a GL row that never competed
+for it hides two errors instead of surfacing one, and is far harder to unwind later
+than an unmatched item is to clear.
+
+### Endpoints
+
+| Endpoint | Method | Purpose |
+|:---------|:-------|:--------|
+| `/api/pipeline/batches/{id}/recon/{dataset}/signoff` | `POST` | Record a decision (`row_key`, `action`, optional `chosen_internal_txn_id`, `analyst`, `analyst_notes`) |
+| `/api/pipeline/batches/{id}/signoffs` | `GET` | Full trail, oldest first. `?effective_only=true` returns only the decision standing per row; `?dataset=` filters |
+| `/api/pipeline/batches/{id}/signoffs/file` | `GET` | The trail as CSV |
+
+### In the console
+
+The reconciliation workbench shows a **Sign-off** column per row (`AWAITING` for an
+unsigned ambiguous tie), and the docked inspector carries the standing decision plus
+a **Sign off** / **Revise sign-off** action. The dialog offers only the actions valid
+for the current dataset, lists only that tie's real candidates when re-pointing, and
+requires a written rationale for any decision that departs from the engine
+(`SELECT_ALTERNATIVE`, `LEAVE_UNSETTLED`, `FLAG_FOR_INVESTIGATION`).
+
+> **Not the same thing as Stage 5b.** The Stage 5b analyst queue *gates* the
+> pipeline: Stage 6 will not run until every escalated anomaly is resolved. Stage 6
+> sign-off does not gate anything — reconciliation has already run and published.
+> It is an attestation recorded over the result.
+
+---
+
+## 5. Dispatch mechanics
 
 Dispatch runs on a background thread, so the external platform never blocks the
 synchronous pipeline. Each attempt is recorded on the batch under
@@ -780,8 +855,8 @@ synchronous pipeline. Each attempt is recorded on the batch under
 ```jsonc
 {
   "stage": "STAGE_4_ANOMALY",
-  "agent_id": "56800",
-  "agent_name": "Enterprise Risk & Anomaly Detection Engine A5",
+  "agent_id": "<from CREWAI_AGENT_ANOMALY_ID>",   // null when that var is unset
+  "agent_name": "Enterprise Risk & Anomaly Detection Engine",
   "trigger": "AUTOMATIC",          // or MANUAL for a retry
   "status": "SUBMITTED",           // PENDING → SUBMITTING → SUBMITTED → IN_PROGRESS → SUCCESS/FAILED, or SKIPPED
   "success": true,
@@ -795,7 +870,8 @@ synchronous pipeline. Each attempt is recorded on the batch under
 
 `SKIPPED` is a normal outcome, not a failure. A stage is skipped when it produced
 no input artefact (a clean batch has no anomalies), when the agent is not
-auto-dispatched, or when `CREWAI_API_URL` / `CREWAI_API_KEY` are unset. The
+auto-dispatched, when its `CREWAI_AGENT_*_ID` is unset, or when `CREWAI_API_URL` /
+`CREWAI_API_KEY` are unset. The `message` field names the variable to set. The
 deterministic local pipeline result stands in every case.
 
 ### Endpoints
@@ -812,7 +888,7 @@ deterministic local pipeline result stands in every case.
 The anomaly queue polls `/agent/output` every 6 seconds while any execution is
 non-terminal, and stops on its own once all are finished.
 
-## 5. Aava AI platform details
+## 6. Aava AI platform details
 
 | Property | Value |
 |:---------|:------|

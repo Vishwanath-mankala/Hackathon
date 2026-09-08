@@ -331,7 +331,7 @@ export class StructuralGateComponent implements OnInit {
       next: (res) => {
         this.ingesting.set(false);
         this.loadGate(res.batch_id);
-        this.toast.info('SFTP drop ingested', `Batch ${res.batch_id} processed through the gate.`);
+        this.toast.info('SFTP drop ingested', res.message);
       },
       error: (err) => {
         this.ingesting.set(false);

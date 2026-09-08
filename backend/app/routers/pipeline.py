@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 
 from app.models.pipeline_models import (
     AgentExecution,
+    AuditSignoff,
+    SignoffRequest,
     BatchRecord,
     StructuralGateDetails,
     AnomalyItem,
@@ -23,6 +25,7 @@ from app.services.pipeline_orchestrator import pipeline_orchestrator
 from app.services.publish_service import publish_service
 from app.services.ingestion_service import ingestion_service
 from app.services.recon_service import recon_service
+from app.services.audit_service import audit_service
 from app.models.recon import PaginatedQueryResponse
 from app.config import settings
 
@@ -117,41 +120,35 @@ async def ingest_batch_file(
 
 
 @router.post("/simulate-sftp", response_model=IngestionResponse)
-def simulate_sftp_ingestion(
-    filename: Optional[str] = Query(None, description="Filename from sample batches to simulate SFTP arrival")
+def pull_next_sftp_drop(
+    filename: Optional[str] = Query(None, description="Specific file to ingest from the dropbox or sample feed")
 ):
     """
-    Simulates real-world automated SFTP drop arrival of a bank statement batch.
+    Ingests the next statement waiting in `incoming_sftp/` on demand.
+
+    If the dropbox is empty it falls back to the generated sample feed, and that
+    batch is tagged `SAMPLE_FEED` — the response message says which source was
+    used, so generated data is never presented as a genuine bank arrival.
     """
-    # Look in batches dir or sftp dir
-    target_file = None
-    if filename:
-        candidate_1 = settings.batches_dir / filename
-        candidate_2 = ingestion_service.sftp_dir / filename
-        if candidate_1.exists():
-            target_file = candidate_1
-        elif candidate_2.exists():
-            target_file = candidate_2
+    try:
+        batch, origin = pipeline_orchestrator.pull_next_sftp_drop(filename=filename)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+    if origin == "SFTP":
+        message = f"SFTP drop {batch.filename} ingested. Stage: {batch.stage}"
     else:
-        # Pick first available batch file
-        candidates = list(settings.batches_dir.glob("ingest_batch_*.csv"))
-        if candidates:
-            target_file = candidates[0]
-
-    if not target_file or not target_file.exists():
-        raise HTTPException(status_code=404, detail="No source file available for SFTP simulation.")
-
-    batch = pipeline_orchestrator.ingest_batch(
-        file_path=target_file,
-        filename=f"sftp_{target_file.name}",
-        source="SFTP",
-        auto_run_pipeline=True
-    )
+        message = (
+            f"SFTP dropbox is empty — ingested generated sample {batch.filename} instead, "
+            f"tagged SAMPLE_FEED. Stage: {batch.stage}"
+        )
 
     return IngestionResponse(
         batch_id=batch.batch_id,
         filename=batch.filename,
-        message=f"Simulated SFTP arrival of {batch.filename} processed.",
+        message=message,
         stage=batch.stage,
         record_count=batch.total_records,
         gate_passed=bool(batch.gate_passed),
@@ -348,6 +345,9 @@ def trigger_agent_classification(
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        # Stage has no agent ID configured — a configuration problem, not a server fault.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent trigger failed: {str(e)}")
 
@@ -500,3 +500,160 @@ def query_batch_recon_dataset(
         )
 
     return recon_service.query_csv_results(target, page, page_size, account, tier)
+
+
+# =============================================================================
+# Stage 6 analyst sign-off & audit trail
+#
+# Ambiguous ties and reconciling items are the lines the waterfall deliberately
+# refuses to settle alone. These endpoints record the human decision as
+# append-only evidence — a correction supersedes, it never overwrites.
+# =============================================================================
+def _find_ambiguous_row(batch_id: str, row_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Locates one ambiguous tie by its contested bank transaction ID.
+
+    Reads the in-memory Stage 6 result when it is still there, and falls back to
+    the exported CSV so sign-off keeps working after a restart.
+    """
+    results = pipeline_orchestrator.batch_match_results.get(batch_id) or {}
+    for row in results.get("ambiguous", []):
+        if str(row.get("ingest_external_txn_id")) == row_key:
+            return row
+
+    path = settings.batch_results_dir / f"{batch_id}_ambiguous.csv"
+    if not path.exists():
+        return None
+    try:
+        import pandas as pd
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except Exception:
+        return None
+    if df.empty or "ingest_external_txn_id" not in df.columns:
+        return None
+    match = df[df["ingest_external_txn_id"].astype(str) == row_key]
+    return match.iloc[0].to_dict() if not match.empty else None
+
+
+def _candidate_ids(row: Dict[str, Any]) -> List[str]:
+    """Normalises candidate_internal_txn_ids, which is a list in memory and a
+    stringified list once it has been through CSV."""
+    raw = row.get("candidate_internal_txn_ids")
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(c).strip() for c in raw if str(c).strip()]
+    cleaned = str(raw).strip().strip("[]")
+    return [c.strip().strip("'\"") for c in cleaned.split(",") if c.strip().strip("'\"")]
+
+
+@router.post("/batches/{batch_id}/recon/{dataset}/signoff", response_model=AuditSignoff)
+def record_analyst_signoff(batch_id: str, dataset: str, req: SignoffRequest):
+    """
+    Records an analyst's decision on one reconciliation line.
+
+    For `ambiguous`: CONFIRM_PROVISIONAL, SELECT_ALTERNATIVE (with
+    `chosen_internal_txn_id`, which must be one of that tie's own candidates), or
+    LEAVE_UNSETTLED. For every other dataset: ATTEST_REVIEWED or
+    FLAG_FOR_INVESTIGATION.
+    """
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    if dataset not in RECON_DATASETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown dataset '{dataset}'. Expected one of: {sorted(RECON_DATASETS)}"
+        )
+
+    valid = audit_service.valid_actions(dataset)
+    if req.action not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Action '{req.action}' is not valid for dataset '{dataset}'. Expected one of: {sorted(valid)}"
+        )
+
+    if not req.row_key.strip():
+        raise HTTPException(status_code=400, detail="row_key is required.")
+
+    chosen = req.chosen_internal_txn_id
+
+    if dataset == "ambiguous":
+        row = _find_ambiguous_row(batch_id, req.row_key)
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No ambiguous tie '{req.row_key}' in batch '{batch_id}'."
+            )
+
+        candidates = _candidate_ids(row)
+
+        if req.action == "SELECT_ALTERNATIVE":
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="SELECT_ALTERNATIVE requires chosen_internal_txn_id."
+                )
+            if candidates and str(chosen) not in candidates:
+                # Settling against a row that never competed for this line would
+                # hide two errors instead of surfacing one.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"GL entry '{chosen}' was not a candidate for tie '{req.row_key}'. "
+                        f"Candidates were: {candidates}"
+                    )
+                )
+        elif req.action == "CONFIRM_PROVISIONAL":
+            chosen = row.get("chosen_internal_txn_id")
+        else:
+            chosen = None
+
+    record, superseded = audit_service.record(
+        batch_id=batch_id,
+        dataset=dataset,
+        row_key=req.row_key.strip(),
+        action=req.action,
+        analyst=(req.analyst or "console-operator").strip(),
+        chosen_internal_txn_id=str(chosen) if chosen else None,
+        analyst_notes=(req.analyst_notes or None),
+    )
+    return record
+
+
+@router.get("/batches/{batch_id}/signoffs", response_model=List[AuditSignoff])
+def list_batch_signoffs(
+    batch_id: str,
+    dataset: Optional[str] = Query(None, description="Filter to one result set"),
+    effective_only: bool = Query(
+        False,
+        description="Return only the decision currently standing for each row, dropping superseded ones"
+    ),
+):
+    """Returns the sign-off audit trail for a batch, oldest first."""
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+
+    if effective_only:
+        records = list(audit_service.effective_for_batch(batch_id).values())
+        records.sort(key=lambda s: s.signed_at)
+    else:
+        records = audit_service.list_for_batch(batch_id)
+
+    if dataset:
+        records = [s for s in records if s.dataset == dataset]
+    return records
+
+
+@router.get("/batches/{batch_id}/signoffs/file")
+def download_signoff_trail(batch_id: str):
+    """Downloads the append-only sign-off trail as CSV for an auditor."""
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+
+    path = audit_service.signoff_file(batch_id)
+    if not path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No sign-off has been recorded for batch '{batch_id}' yet."
+        )
+    return FileResponse(path=str(path), filename=path.name, media_type="text/csv")

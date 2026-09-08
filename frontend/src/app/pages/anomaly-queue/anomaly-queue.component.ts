@@ -133,7 +133,11 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                       </span>
                       <span class="text-text-primary font-semibold">{{ stageLabel(exec.stage) }}</span>
                       <span class="text-text-secondary">· {{ exec.agent_name }}</span>
-                      <span class="text-text-secondary">· ID {{ exec.agent_id }}</span>
+                      @if (exec.agent_id) {
+                        <span class="text-text-secondary">· ID {{ exec.agent_id }}</span>
+                      } @else {
+                        <span class="text-status-amber">· no agent ID configured</span>
+                      }
                       <span class="text-[10px] px-1.5 py-0.5 border border-border-default text-text-secondary">
                         {{ exec.trigger }}
                       </span>
@@ -469,7 +473,9 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
     if (!id) return;
 
     this.redispatchingStage.set(exec.stage);
-    this.pipeline.redispatchAgent(id, exec.stage, exec.agent_id).subscribe({
+    // Null agent_id means the stage has none configured; let the backend
+    // resolve the stage's own ID (and report clearly if there isn't one).
+    this.pipeline.redispatchAgent(id, exec.stage, exec.agent_id ?? undefined).subscribe({
       next: (res) => {
         this.redispatchingStage.set(null);
         this.toast.success(

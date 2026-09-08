@@ -114,7 +114,8 @@ export type AgentExecutionStatus =
 
 export interface AgentExecution {
   stage: AgentStageKey | string;
-  agent_id: string;
+  /** Null when the stage has no CREWAI_AGENT_*_ID configured. */
+  agent_id: string | null;
   agent_name: string;
   trigger: 'AUTOMATIC' | 'MANUAL';
   success: boolean;
@@ -131,7 +132,9 @@ export interface AgentExecution {
 
 /** One entry of the configured multi-agent roster, served by the API. */
 export interface ConfiguredAgent {
-  id: string;
+  /** Null until the CREWAI_AGENT_*_ID env var is set — there is no default. */
+  id: string | null;
+  configured: boolean;
   key: string;
   stage_key: AgentStageKey | string;
   name: string;
@@ -216,6 +219,40 @@ export interface PipelineOverview {
   sla_breaches: number;
   at_risk_count: number;
   batches: BatchRecord[];
+}
+
+/** Actions valid for an ambiguous multi-candidate tie. */
+export type AmbiguousSignoffAction =
+  | 'CONFIRM_PROVISIONAL'
+  | 'SELECT_ALTERNATIVE'
+  | 'LEAVE_UNSETTLED';
+
+/** Actions valid for any other reconciliation line. */
+export type AttestationAction = 'ATTEST_REVIEWED' | 'FLAG_FOR_INVESTIGATION';
+
+export type SignoffAction = AmbiguousSignoffAction | AttestationAction;
+
+/** One analyst decision on one reconciliation line. Append-only. */
+export interface AuditSignoff {
+  signoff_id: string;
+  batch_id: string;
+  dataset: string;
+  row_key: string;
+  action: SignoffAction | string;
+  chosen_internal_txn_id?: string | null;
+  analyst: string;
+  analyst_notes?: string | null;
+  signed_at: string;
+  /** signoff_id this decision replaces; null for a first sign-off. */
+  supersedes?: string | null;
+}
+
+export interface SignoffRequest {
+  row_key: string;
+  action: SignoffAction | string;
+  chosen_internal_txn_id?: string | null;
+  analyst?: string | null;
+  analyst_notes?: string | null;
 }
 
 /** Artefact kinds exposed by GET /batches/{id}/artifacts/{kind}. */
