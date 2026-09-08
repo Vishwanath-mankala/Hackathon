@@ -1,5 +1,5 @@
 ---
-system: Vanguard Ledger Reconciliation Console
+system: Recon Master Reconciliation Console
 version: 2.0
 typography:
   sans: IBM Plex Sans

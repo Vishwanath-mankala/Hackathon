@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-09-03T12:15:00.000Z",
-  "title": "Design System: Vanguard Ledger",
+  "title": "Design System: Recon Master",
   "extensions": {
     "colorMeta": {
       "primary": {
@@ -89,7 +89,7 @@
   ],
   "narrative": {
     "northStar": "The Obsidian Bloomberg Workbench",
-    "overview": "Vanguard Ledger is built for enterprise treasury and financial operations teams who execute high-volume multi-bank reconciliations under strict close deadlines. The interface treats raw financial data as the primary design material: zero decorative fluff, authoritative dark obsidian surfaces, and high-contrast luminous semantic beacons that enable instant break triage.",
+    "overview": "Recon Master is built for enterprise treasury and financial operations teams who execute high-volume multi-bank reconciliations under strict close deadlines. The interface treats raw financial data as the primary design material: zero decorative fluff, authoritative dark obsidian surfaces, and high-contrast luminous semantic beacons that enable instant break triage.",
     "keyCharacteristics": [
       "Obsidian Dark Canvas (#0B0E14 base)",
       "Strict Semantic Differentiation (Emerald, Rose, Amber, Sky, Purple)",
@@ -99,7 +99,7 @@
     "rules": [
       {
         "name": "The Strict Semantic Exclusivity Rule",
-        "body": "Semantic status colors (Emerald, Rose, Amber) are strictly prohibited on decorative or non-status elements. Color in Vanguard Ledger always communicates financial truth.",
+        "body": "Semantic status colors (Emerald, Rose, Amber) are strictly prohibited on decorative or non-status elements. Color in Recon Master always communicates financial truth.",
         "section": "colors"
       },
       {

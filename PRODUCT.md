@@ -10,7 +10,7 @@ web
 Enterprise Treasury & Finance Operations Teams handling high-volume multi-bank reconciliations, strict regulatory audits, and daily settlement closing under time-critical deadlines.
 
 ## Product Purpose
-Vanguard Ledger automates the transformation, structural verification, and tiered matching of complex GL cashbook records against sequential bank statement feeds. It eliminates manual spreadsheet matching, isolates corrupted files before rule processing, and provides transparent break resolution.
+Recon Master automates the transformation, structural verification, and tiered matching of complex GL cashbook records against sequential bank statement feeds. It eliminates manual spreadsheet matching, isolates corrupted files before rule processing, and provides transparent break resolution.
 
 ## Positioning
 A deterministic, tiered waterfall reconciliation operating system that pairs rigorous 4-point structural pre-flight gating (encoding, canonical headers, count parity, control totals) with multi-tier matching and narrative token disambiguation.
@@ -27,7 +27,7 @@ A deterministic, tiered waterfall reconciliation operating system that pairs rig
 - **Defensive Resilience:** Active chaos error injection (`truncate`, `dropped_row`, `duplicate_row`, `tampered_amount`, `missing_column`, `bad_encoding`) and instant `.bak` rollback.
 
 ## Brand Commitments
-- **Name:** Vanguard Ledger (V-Ledger)
+- **Name:** Recon Master
 - **Aesthetic & Tone:** Vanguard Precision (Slate & Cyanide). Authoritative, clinical, data-dense, with high-contrast semantic indicators and zero decorative fluff.
 
 ## Evidence on Hand

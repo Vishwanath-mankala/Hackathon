@@ -11,7 +11,7 @@ import { SpinnerComponent } from '../../shared/components/spinner/spinner.compon
   template: `
     <header class="h-10 bg-surface border-b border-border-default px-4 flex items-center justify-between shrink-0">
       <div class="flex items-center gap-0 text-[12px] font-mono text-text-secondary">
-        <span class="text-text-primary font-medium">Vanguard Ledger</span>
+        <span class="text-text-primary font-medium">Recon Master</span>
         <span class="mx-2 text-border-strong">·</span>
         <span>Reconciliation console</span>
         @if (health(); as h) {
