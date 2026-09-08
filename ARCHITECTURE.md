@@ -139,8 +139,10 @@ flowchart TD
 * **Purpose**: Predict end-of-day completion times and continuously monitor SLA compliance risk for downstream operations.
 * **Dynamic Estimation Engine**:
   - Evaluates file payload size and historical throughput benchmark (records/sec).
+  - The throughput and per-escalation queue-wait constants are **calibrated from the run history** (`data/forecasts/run_history.csv`, one row per completed batch with machine time and analyst queue wait measured separately) once five batches of meaningful size have completed; until then the declared defaults are used and reported as such.
   - Compounds baseline execution duration with dynamic penalties for row anomalies and operator manual triage queue delays.
   - Outputs live **Estimated Completion Time (ETA)** (e.g. `2026-09-04 18:15:00 UTC`).
+  - A **forecast agent** (`CREWAI_AGENT_FORECAST_ID`, hook `STAGE_1_FORECAST`) is dispatched at ingest, before Stage 2, with the batch's ingest-time features and a snapshot of the run history; its prediction is captured server-side and scored against the measured actual. See AGENTS.md.
   - Emits real-time SLA status:
     - `ON_TRACK`: Estimated completion well within cutoff window.
     - `AT_RISK`: Projected to finish within 15 minutes of SLA cutoff.

@@ -15,11 +15,7 @@ import { AgentExecution, AnomalyItem } from '../../core/models/pipeline.models';
 import { AsyncStateComponent } from '../../shared/components/async-state/async-state.component';
 import { SpinnerComponent } from '../../shared/components/spinner/spinner.component';
 import { AgentReportComponent } from '../../shared/components/agent-report/agent-report.component';
-
-/** Execution states that mean the agent job is finished — polling stops here. */
-const TERMINAL_STATES = new Set(['SUCCESS', 'COMPLETED', 'FAILED', 'ERROR', 'CANCELLED', 'SKIPPED']);
-
-const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', 'STAGE_7_SLA'];
+import { isRunning as isAgentRunning, stageIndex, stageLabel as agentStageLabel } from '../../core/agent-states';
 
 @Component({
   selector: 'app-anomaly-queue',
@@ -460,7 +456,7 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
   /** Agent dispatches for the active batch, ordered by pipeline stage. */
   executionList = computed<AgentExecution[]>(() =>
     Object.values(this.pipeline.agentExecutions()).sort(
-      (a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage)
+      (a, b) => stageIndex(a.stage) - stageIndex(b.stage)
     )
   );
 
@@ -554,17 +550,11 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
   }
 
   isRunning(status: string): boolean {
-    return !TERMINAL_STATES.has(status);
+    return isAgentRunning(status);
   }
 
   stageLabel(stage: string): string {
-    switch (stage) {
-      case 'STAGE_1_EXTRACTION': return 'Stage 1 · Extraction';
-      case 'STAGE_4_ANOMALY': return 'Stage 4 · Anomaly scoring';
-      case 'STAGE_6_RECON': return 'Stage 6 · Recon exceptions';
-      case 'STAGE_7_SLA': return 'Stage 7 · SLA urgency';
-      default: return stage;
-    }
+    return agentStageLabel(stage);
   }
 
   statusClass(status: string): string {

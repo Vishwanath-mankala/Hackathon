@@ -16,6 +16,8 @@ import {
   AuditSignoff,
   BatchReconResponse,
   ConfiguredAgent,
+  ForecastComparison,
+  RunHistoryResponse,
   SignoffRequest
 } from '../models/pipeline.models';
 import { environment } from '../../../environments/environment.generated';
@@ -232,6 +234,27 @@ export class PipelineService {
   // --------------------------------------------------------------------------
   loadTimeEstimate(batchId: string): Observable<TimeEstimate> {
     return this.http.get<TimeEstimate>(`${this.baseUrl}/batches/${batchId}/estimator`);
+  }
+
+  /**
+   * Local estimate vs the Stage 1 forecast agent vs the measured actual, plus
+   * where the estimator's constants came from. The forecast is issued before
+   * the batch is processed and captured by the backend on its own.
+   */
+  loadForecast(batchId: string): Observable<ForecastComparison> {
+    return this.http.get<ForecastComparison>(`${this.baseUrl}/batches/${batchId}/forecast`);
+  }
+
+  /** The processing-time knowledge base: one row per completed run, newest first. */
+  loadRunHistory(limit: number = 25, eligibleOnly: boolean = false): Observable<RunHistoryResponse> {
+    const params = new HttpParams()
+      .set('limit', limit.toString())
+      .set('eligible_only', eligibleOnly.toString());
+    return this.http.get<RunHistoryResponse>(`${this.baseUrl}/run-history`, { params });
+  }
+
+  getRunHistoryUrl(): string {
+    return `${this.baseUrl}/run-history/file`;
   }
 
   // --------------------------------------------------------------------------

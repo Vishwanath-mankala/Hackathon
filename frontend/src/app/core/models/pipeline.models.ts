@@ -72,7 +72,107 @@ export interface TimeEstimate {
   sla_target_seconds: number;
   sla_status: 'ON_TRACK' | 'AT_RISK' | 'BREACHED';
   completed_at?: string | null;
+  /** Wall-clock, including analyst queue wait. */
   actual_duration_seconds?: number | null;
+  /** Machine work vs human wait, kept separate. */
+  estimated_machine_seconds: number;
+  estimated_queue_wait_sec: number;
+  machine_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  /** DEFAULT = declared formula constants; HISTORY = derived from the run history. */
+  calibration_source: 'DEFAULT' | 'HISTORY' | string;
+  calibration_sample_size: number;
+  calibration_factor: number;
+  baseline_throughput_used: number;
+}
+
+export type ForecastStatus = 'PENDING' | 'RECEIVED' | 'TIMED_OUT' | 'UNPARSEABLE' | 'SKIPPED' | 'FAILED';
+
+/** The Stage 1 forecast agent's prediction, captured server-side and scored after the run. */
+export interface BatchForecast {
+  status: ForecastStatus | string;
+  forecast_seconds?: number | null;
+  p10_seconds?: number | null;
+  p90_seconds?: number | null;
+  confidence?: string | null;
+  breach_probability_pct?: number | null;
+  expected_escalation_rate_pct?: number | null;
+  dominant_uncertainty?: string | null;
+  comparable_batches: string[];
+  reasoning?: string | null;
+  dashboard_line?: string | null;
+  agent_execution_id?: string | null;
+  issued_at?: string | null;
+  received_at?: string | null;
+  message?: string | null;
+  /** Signed, vs measured wall_seconds. Positive = over-estimated. */
+  error_pct?: number | null;
+}
+
+export interface RunHistoryRow {
+  batch_id: string;
+  completed_at: string;
+  source: string;
+  filename: string;
+  outcome: string;
+  provenance: 'LIVE' | 'BACKFILL_SLA_METRICS' | string;
+  gate_passed: boolean;
+  record_count: number;
+  file_size_mb: number;
+  anomaly_count: number;
+  escalated_count: number;
+  matched_count: number;
+  estimate_at_ingest_sec?: number | null;
+  estimate_final_sec?: number | null;
+  machine_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  wall_seconds?: number | null;
+  throughput_actual_rec_per_sec?: number | null;
+  local_error_pct?: number | null;
+  eligible_for_calibration: boolean;
+  forecast_seconds?: number | null;
+  forecast_error_pct?: number | null;
+  forecast_status?: string | null;
+}
+
+export interface CalibrationSummary {
+  source: 'DEFAULT' | 'HISTORY' | string;
+  sample_size: number;
+  min_runs_required: number;
+  baseline_throughput: number;
+  default_throughput: number;
+  queue_wait_per_escalation_sec: number;
+  default_queue_wait_sec: number;
+  residual_factor: number;
+  total_runs_recorded: number;
+  forecasts_received: number;
+  forecast_median_abs_error_pct?: number | null;
+  local_median_abs_error_pct?: number | null;
+}
+
+export interface MeasuredActual {
+  machine_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  wall_seconds?: number | null;
+  still_parked: boolean;
+}
+
+/** GET /batches/{id}/forecast */
+export interface ForecastComparison {
+  batch_id: string;
+  stage: string;
+  local_estimate: TimeEstimate;
+  agent_forecast?: BatchForecast | null;
+  execution?: AgentExecution | null;
+  actual?: MeasuredActual | null;
+  calibration: CalibrationSummary;
+}
+
+/** GET /run-history */
+export interface RunHistoryResponse {
+  rows: RunHistoryRow[];
+  calibration: CalibrationSummary;
+  file?: string | null;
 }
 
 export interface GLMatchSummary {
@@ -100,6 +200,7 @@ export interface PublishEvent {
 
 /** Pipeline stage that owns an automatic agent dispatch. */
 export type AgentStageKey =
+  | 'STAGE_1_FORECAST'
   | 'STAGE_1_EXTRACTION'
   | 'STAGE_4_ANOMALY'
   | 'STAGE_6_RECON'
@@ -130,10 +231,14 @@ export interface AgentExecution {
   status: AgentExecutionStatus;
   message?: string | null;
   http_status?: string | null;
+  /** Primary artefact; names the zip. */
   target_file?: string | null;
+  /** Every member of the zip the agent was handed. */
+  bundled_files?: string[];
   submitted_at?: string | null;
   completed_at?: string | null;
   output?: any;
+  forecast_captured?: boolean;
 }
 
 /** One entry of the configured multi-agent roster, served by the API. */
@@ -182,6 +287,13 @@ export interface BatchRecord {
   outstanding_file_path?: string | null;
   ambiguous_file_path?: string | null;
   sla_metrics_file_path?: string | null;
+  forecast_input_file_path?: string | null;
+  run_history_file_path?: string | null;
+  machine_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  wall_seconds?: number | null;
+  estimate_at_ingest_sec?: number | null;
+  agent_forecast?: BatchForecast | null;
   agent_executions: Record<string, AgentExecution>;
 }
 
@@ -189,6 +301,8 @@ export interface AgentStatusResponse {
   batch_id: string;
   executions: Record<string, AgentExecution>;
   artifacts: {
+    forecast_input: boolean;
+    run_history: boolean;
     anomaly_candidates: boolean;
     recon_exceptions: boolean;
     sla_metrics: boolean;
@@ -264,6 +378,8 @@ export interface SignoffRequest {
 /** Artefact kinds exposed by GET /batches/{id}/artifacts/{kind}. */
 export type ArtifactKind =
   | 'statement'
+  | 'forecast_input'
+  | 'run_history'
   | 'anomaly_candidates'
   | 'matched'
   | 'unmatched_bank'

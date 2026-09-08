@@ -15,6 +15,9 @@ from app.models.pipeline_models import (
     StructuralGateDetails,
     AnomalyItem,
     TimeEstimate,
+    ForecastComparison,
+    RunHistoryRow,
+    CalibrationSummary,
     GLMatchSummary,
     PublishEvent,
     PipelineOverview,
@@ -26,6 +29,8 @@ from app.services.publish_service import publish_service
 from app.services.ingestion_service import ingestion_service
 from app.services.recon_service import recon_service
 from app.services.audit_service import audit_service
+from app.services.run_history_service import run_history_service
+from app.services.time_estimator_service import time_estimator_service
 from app.models.recon import PaginatedQueryResponse
 from app.config import settings
 
@@ -34,6 +39,8 @@ router = APIRouter(prefix="/api/pipeline", tags=["Pipeline Orchestrator"])
 # Stage artefacts downloadable through /batches/{id}/artifacts/{kind}
 ARTIFACT_FIELDS = {
     "statement": ("batch_file_path", "text/csv"),
+    "forecast_input": ("forecast_input_file_path", "text/csv"),
+    "run_history": ("run_history_file_path", "text/csv"),
     "anomaly_candidates": ("anomaly_file_path", "text/csv"),
     "matched": ("matched_file_path", "text/csv"),
     "unmatched_bank": ("unmatched_file_path", "text/csv"),
@@ -252,6 +259,64 @@ def get_time_estimate(batch_id: str):
     return est
 
 
+@router.get("/batches/{batch_id}/forecast", response_model=ForecastComparison)
+def get_batch_forecast(batch_id: str):
+    """
+    Local estimate vs the Stage 1 forecast agent's prediction vs the measured
+    actual, plus where the estimator's constants came from. The agent forecast
+    is issued before processing from ingest-time features and the run history;
+    `agent_forecast.status` says whether it was received, is still pending,
+    timed out, was unparseable, or was skipped because
+    CREWAI_AGENT_FORECAST_ID is unset.
+    """
+    try:
+        return pipeline_orchestrator.get_forecast_comparison(batch_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/run-history")
+def get_run_history(
+    limit: int = Query(50, ge=1, le=500),
+    eligible_only: bool = Query(False, description="Only runs the estimator calibrates from"),
+):
+    """
+    The processing-time knowledge base: one row per completed batch with its
+    ingest-time features, outcome, measured machine/queue/wall seconds, the local
+    estimate, the agent forecast and both signed errors. Newest first.
+    """
+    rows = [RunHistoryRow(**_history_row_payload(r)) for r in run_history_service.rows(limit, eligible_only)]
+    return {
+        "rows": rows,
+        "calibration": time_estimator_service.calibration_summary(),
+        "file": str(run_history_service.path) if run_history_service.path.exists() else None,
+    }
+
+
+@router.get("/run-history/file")
+def download_run_history():
+    """Downloads the master run_history.csv."""
+    path = run_history_service.path
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No run has been recorded yet.")
+    return FileResponse(path=str(path), filename=path.name, media_type="text/csv")
+
+
+def _history_row_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    fields = RunHistoryRow.model_fields.keys()
+    payload = {k: row.get(k) for k in fields}
+    for int_key in ("record_count", "anomaly_count", "escalated_count", "matched_count"):
+        payload[int_key] = int(payload.get(int_key) or 0)
+    payload["file_size_mb"] = float(payload.get("file_size_mb") or 0.0)
+    payload["gate_passed"] = bool(payload.get("gate_passed"))
+    payload["eligible_for_calibration"] = bool(payload.get("eligible_for_calibration"))
+    for text_key in ("completed_at", "source", "filename", "outcome", "provenance"):
+        payload[text_key] = payload.get(text_key) or ""
+    return payload
+
+
 @router.post("/batches/{batch_id}/publish", response_model=PublishEvent)
 def publish_batch_results(batch_id: str):
     """Broadcasts batch completion and reconciliation summary to downstream message bus."""
@@ -364,6 +429,8 @@ def get_batch_agent_status(batch_id: str):
         "batch_id": batch_id,
         "executions": batch.agent_executions,
         "artifacts": {
+            "forecast_input": _exists(batch.forecast_input_file_path),
+            "run_history": _exists(batch.run_history_file_path),
             "anomaly_candidates": _exists(batch.anomaly_file_path),
             "recon_exceptions": _exists(batch.ambiguous_file_path),
             "sla_metrics": _exists(batch.sla_metrics_file_path),
@@ -425,11 +492,13 @@ def test_agent_connection():
 def get_available_agents():
     """
     Returns the configured multi-agent team and their role assignments:
+    - Stage 1 Processing Time Forecast (CREWAI_AGENT_FORECAST_ID)
     - Stage 4 Anomaly Classification (CREWAI_AGENT_ANOMALY_ID)
     - Stage 7 SLA & Urgency (CREWAI_AGENT_SLA_ID)
     - Stage 6 Exception Verification (CREWAI_AGENT_RECON_ID)
-    - Stage 2 Ingestion & Extraction (CREWAI_AGENT_EXTRACTION_ID)
+    - Stage 1 Ingestion & Extraction, manual only (CREWAI_AGENT_EXTRACTION_ID)
     - Workbench Collab (CREWAI_AGENT_COLLAB_ID)
+    Each entry carries `configured: true|false`; there are no default IDs.
     """
     from app.services.agentic_anomaly_service import agentic_anomaly_service
     return agentic_anomaly_service.agent_bridge.get_configured_agents()
@@ -442,7 +511,8 @@ def get_available_agents():
 def download_batch_artifact(batch_id: str, kind: str):
     """
     Downloads any stage artefact produced for this batch:
-    statement, anomaly_candidates, matched, unmatched_bank, outstanding_gl,
+    statement, forecast_input, run_history (the snapshot the forecast agent
+    saw), anomaly_candidates, matched, unmatched_bank, outstanding_gl,
     recon_exceptions, sla_metrics.
     """
     if batch_id not in pipeline_orchestrator.batches:

@@ -61,6 +61,8 @@ data/batch_results/*
 !data/batch_results/.gitkeep
 data/sla_metrics/*
 !data/sla_metrics/.gitkeep
+data/forecasts/*
+!data/forecasts/.gitkeep
 incoming_sftp/*.csv
 incoming_sftp/processed/
 

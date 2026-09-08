@@ -36,6 +36,25 @@ Agent IDs are blank by default and have no fallbacks: an ID is issued by the
 agent platform and cannot be guessed. A stage with a blank ID reports
 `SKIPPED — no agent ID configured`, and the deterministic pipeline still runs
 end to end. See [AGENTS.md](AGENTS.md) for the prompt to create each agent with.
+The agents are `CREWAI_AGENT_FORECAST_ID` (Stage 1 processing-time forecast),
+`CREWAI_AGENT_ANOMALY_ID` (Stage 4), `CREWAI_AGENT_RECON_ID` (Stage 6),
+`CREWAI_AGENT_SLA_ID` (Stage 7) and `CREWAI_AGENT_EXTRACTION_ID` (manual only).
+
+### Processing-time knowledge base
+
+Every completed batch is recorded in `data/forecasts/run_history.csv` with its
+machine time and analyst queue wait measured separately. The estimator calibrates
+its throughput and queue-wait constants from that file once five batches of 200+
+rows have completed, and the forecast agent is handed a snapshot of it with every
+new batch. Two deployment consequences:
+
+- **Persistent storage.** Point `FORECAST_DIR` (and the other `*_DIR` settings in
+  `.env.example`) at a mounted volume. An ephemeral container filesystem starts
+  the history cold on every restart.
+- **One API process.** The batch registry, orchestrator and history are
+  in-memory with a file behind them. Run `uvicorn` with a single worker; several
+  workers or replicas would split batches across processes and interleave
+  history writes.
 
 ---
 

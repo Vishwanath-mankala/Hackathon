@@ -11,19 +11,28 @@ Pipeline Orchestrator — Sequences the 8 stages of the batch validation and rec
 
 Every stage runs automatically as soon as its predecessor produces its artefacts.
 The only stage that blocks on a human is Stage 5b (analyst escalation review).
+
+Stage 1 also dispatches the forecast agent (CREWAI_AGENT_FORECAST_ID) before any
+processing starts, with the batch's ingest-time features and a snapshot of the
+run history, and captures its prediction server-side so the history learns
+whether or not anyone has the console open.
 """
+import re
 import sys
+import json
 import time
 import shutil
 import logging
 import threading
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 from app.models.pipeline_models import (
     BatchRecord,
+    BatchForecast,
+    ForecastComparison,
     StructuralGateDetails,
     CheckDetail,
     AnomalyItem,
@@ -34,6 +43,7 @@ from app.models.pipeline_models import (
 from app.services.ingestion_service import ingestion_service
 from app.services.agentic_anomaly_service import agentic_anomaly_service
 from app.services.time_estimator_service import time_estimator_service
+from app.services.run_history_service import run_history_service
 from app.services.publish_service import publish_service
 from app.config import settings
 
@@ -59,8 +69,15 @@ class PipelineOrchestrator:
         self._recon_engine = None
         self._reconciled_batches: set = set()
         self._ingested_sources: set = set()   # resolved paths already turned into a batch
+        # Per-batch stopwatch: machine time accumulates while processing, queue
+        # time while parked at the analyst queue. See _clock_*.
+        self._clocks: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._load_gl_cache()
+        try:
+            run_history_service.backfill_from_sla_metrics()
+        except Exception as e:
+            logger.warning(f"Run-history backfill skipped: {e}")
         self._poll_sftp_dropbox()
 
     # =========================================================================
@@ -185,6 +202,9 @@ class PipelineOrchestrator:
         declared_control_total: Optional[float] = None,
         auto_run_pipeline: bool = True
     ) -> BatchRecord:
+        # The clock starts before the file is stored and parsed: the estimate
+        # models parse time, so the measurement has to include it.
+        ingest_started = time.monotonic()
         batch_id, stored_path, meta, df = ingestion_service.ingest_file(
             file_path=file_path,
             file_bytes=file_bytes,
@@ -193,6 +213,7 @@ class PipelineOrchestrator:
             declared_record_count=declared_record_count,
             declared_control_total=declared_control_total
         )
+        self._clock_start(batch_id, ingest_started)
 
         now_str = self._now()
 
@@ -215,6 +236,7 @@ class PipelineOrchestrator:
             created_at=now_str,
             updated_at=now_str,
             time_estimate=time_est,
+            estimate_at_ingest_sec=time_est.total_estimated_seconds,
             batch_file_path=str(stored_path)
         )
 
@@ -224,18 +246,45 @@ class PipelineOrchestrator:
         if file_path is not None:
             self._ingested_sources.add(str(Path(file_path).resolve()))
 
+        # Stage 1 forecast: issued before processing from what is known now plus
+        # the history of comparable batches. Registered after the batch is in the
+        # registry, since the submit thread looks it up by id.
+        self._dispatch_forecast(record, meta)
+
         if auto_run_pipeline:
             self.run_pipeline(batch_id, stored_path, meta)
 
         return record
 
+    def _dispatch_forecast(self, batch: BatchRecord, meta: Dict[str, Any]):
+        try:
+            input_path = run_history_service.write_forecast_input(batch, batch.time_estimate, meta)
+            history_path = run_history_service.snapshot_history_for(batch.batch_id)
+            batch.forecast_input_file_path = str(input_path)
+            batch.run_history_file_path = str(history_path)
+        except Exception as e:
+            logger.error(f"Could not write forecast bundle for {batch.batch_id}: {e}")
+            batch.agent_forecast = BatchForecast(status="FAILED", message=f"Forecast bundle not written: {e}")
+            return
+
+        self._dispatch_agent_async(
+            batch, "STAGE_1_FORECAST", batch.forecast_input_file_path,
+            extra_paths=[batch.run_history_file_path],
+        )
+        execution = batch.agent_executions.get("STAGE_1_FORECAST")
+        if execution and execution.status == "SKIPPED":
+            batch.agent_forecast = BatchForecast(status="SKIPPED", message=execution.message)
+        else:
+            batch.agent_forecast = BatchForecast(status="PENDING", issued_at=self._now())
+
     # =========================================================================
     # Stages 2 -> 8
     # =========================================================================
     def run_pipeline(self, batch_id: str, stored_path: Path, meta: Dict[str, Any]):
-        start_clock = time.time()
         batch = self.batches[batch_id]
         df = self.batch_dfs[batch_id]
+        if batch_id not in self._clocks:
+            self._clock_start(batch_id)
 
         # ---- Stage 2: File-level Structural Gate ----------------------------
         gate_details = self._execute_structural_gate(batch_id, stored_path, df, meta)
@@ -246,6 +295,10 @@ class PipelineOrchestrator:
             batch.stage = "GATE_QUARANTINED"
             batch.updated_at = self._now()
             logger.warning(f"Batch {batch_id} failed structural gate: {gate_details.reasons}")
+            # A quarantined batch is still a run with a measured duration; the
+            # history keeps it (ineligible for calibration) so the forecast agent
+            # can learn what a file that fails the gate looks like at ingest.
+            self._record_history(batch, "GATE_QUARANTINED")
             return batch
 
         batch.stage = "GATE_PASSED"
@@ -288,12 +341,13 @@ class PipelineOrchestrator:
             # Stage 6 only runs once every escalation is signed off, so an
             # approved correction is matched against the GL rather than skipped.
             batch.stage = "ESCALATED_FOR_REVIEW"
-            self._finalize_sla(batch, start_clock)
+            self._clock_hold(batch_id)
+            self._finalize_sla(batch)
             batch.updated_at = self._now()
             return batch
 
         batch.stage = "RULE_VALIDATED"
-        self._reconcile_and_finalize(batch, clean_df, start_clock)
+        self._reconcile_and_finalize(batch, clean_df)
         return batch
 
     def _revalidate_after_remediation(
@@ -326,7 +380,6 @@ class PipelineOrchestrator:
         self,
         batch: BatchRecord,
         valid_df: pd.DataFrame,
-        start_clock: float,
     ):
         """Stages 6 -> 8, plus the Stage 6 agent dispatch."""
         if batch.batch_id in self._reconciled_batches:
@@ -342,7 +395,7 @@ class PipelineOrchestrator:
         batch.unmatched_count = gl_summary.unmatched_reconciling_items
 
         # ---- Stage 7: SLA estimate + metrics artefact -----------------------
-        self._finalize_sla(batch, start_clock, gl_summary)
+        self._finalize_sla(batch, gl_summary)
 
         # ---- Stage 6 agent dispatch -----------------------------------------
         self._dispatch_agent_async(batch, "STAGE_6_RECON", batch.ambiguous_file_path or batch.unmatched_file_path)
@@ -355,14 +408,27 @@ class PipelineOrchestrator:
     def _finalize_sla(
         self,
         batch: BatchRecord,
-        start_clock: float,
         gl_summary: Optional[GLMatchSummary] = None,
     ):
-        """Stage 7: records the actual run, exports the SLA feature vector, dispatches the SLA agent."""
+        """
+        Stage 7: records the actual run (machine time and analyst queue wait
+        separately), writes the history row, exports the SLA feature vector and
+        dispatches the SLA agent. Runs once when a batch parks at the analyst
+        queue and again when it is released; the history row is upserted.
+        """
         if not batch.time_estimate:
             return
 
-        time_estimator_service.record_actual_run(batch.time_estimate, time.time() - start_clock)
+        # Keyed off the stopwatch, not batch.stage: on release this runs before
+        # the stage flips to RECONCILED.
+        if self._is_parked(batch.batch_id):
+            outcome = "ESCALATED_PENDING"
+        elif self._was_parked(batch.batch_id):
+            outcome = "ESCALATED_RESOLVED"
+        else:
+            outcome = "RECONCILED"
+        self._record_history(batch, outcome, gl_summary)
+
         try:
             sla_path = time_estimator_service.export_sla_metrics(
                 estimate=batch.time_estimate,
@@ -377,6 +443,77 @@ class PipelineOrchestrator:
             return
 
         self._dispatch_agent_async(batch, "STAGE_7_SLA", batch.sla_metrics_file_path)
+
+    def _record_history(self, batch: BatchRecord, outcome: str, gl_summary: Optional[GLMatchSummary] = None):
+        """Reads the stopwatch, stamps the actuals on the batch and upserts its history row."""
+        machine, queue, wall = self._clock_read(batch.batch_id)
+        batch.machine_seconds = round(machine, 3)
+        batch.queue_wait_seconds = round(queue, 3)
+        batch.wall_seconds = round(wall, 3)
+        if batch.time_estimate:
+            time_estimator_service.record_actual_run(batch.time_estimate, machine, queue, wall)
+        try:
+            run_history_service.record_run(batch, machine, queue, wall, outcome, gl_summary)
+        except Exception as e:
+            logger.error(f"Could not record run history for {batch.batch_id}: {e}")
+        # A forecast that arrived while the batch was parked can now be scored.
+        self._score_forecast(batch)
+
+    # =========================================================================
+    # Stopwatch
+    #
+    # There is deliberately no clock value to pass around: a caller that could
+    # pass one could pass a fresh one, which is how analyst queue wait went
+    # unmeasured for 54 batches. time.monotonic() so NTP steps cannot skew it.
+    # =========================================================================
+    def _clock_start(self, batch_id: str, started_at: Optional[float] = None):
+        self._clocks[batch_id] = {
+            "segment_start": started_at if started_at is not None else time.monotonic(),
+            "machine_accum": 0.0,
+            "queue_accum": 0.0,
+            "held_at": None,
+        }
+
+    def _clock_hold(self, batch_id: str):
+        """Entering the analyst queue: bank the machine time, start counting wait."""
+        c = self._clocks.get(batch_id)
+        if not c or c["held_at"] is not None:
+            return
+        now = time.monotonic()
+        c["machine_accum"] += now - c["segment_start"]
+        c["held_at"] = now
+
+    def _clock_release(self, batch_id: str):
+        """Last escalation cleared: bank the wait, machine time resumes."""
+        c = self._clocks.get(batch_id)
+        if not c or c["held_at"] is None:
+            return
+        now = time.monotonic()
+        c["queue_accum"] += now - c["held_at"]
+        c["held_at"] = None
+        c["segment_start"] = now
+
+    def _is_parked(self, batch_id: str) -> bool:
+        c = self._clocks.get(batch_id)
+        return bool(c and c["held_at"] is not None)
+
+    def _was_parked(self, batch_id: str) -> bool:
+        c = self._clocks.get(batch_id)
+        return bool(c and c["queue_accum"] > 0)
+
+    def _clock_read(self, batch_id: str) -> Tuple[float, float, float]:
+        """(machine, queue_wait, wall) seconds so far. Non-destructive."""
+        c = self._clocks.get(batch_id)
+        if not c:
+            return 0.0, 0.0, 0.0
+        now = time.monotonic()
+        machine = c["machine_accum"]
+        queue = c["queue_accum"]
+        if c["held_at"] is not None:
+            queue += now - c["held_at"]
+        else:
+            machine += now - c["segment_start"]
+        return machine, queue, machine + queue
 
     # =========================================================================
     # Stage 2 implementation
@@ -686,7 +823,10 @@ class PipelineOrchestrator:
         if not remaining_escalated:
             valid_df = df[~df.index.isin([a.row_index for a in anomalies if a.status == "QUARANTINED"])].copy()
             batch.valid_records_count = len(valid_df)
-            self._reconcile_and_finalize(batch, valid_df, time.time())
+            # The batch has been parked since Stage 5b; that wait is the actual
+            # SLA cost and is what the forecast is scored against.
+            self._clock_release(batch_id)
+            self._reconcile_and_finalize(batch, valid_df)
 
         batch.updated_at = self._now()
         return batch
@@ -694,11 +834,18 @@ class PipelineOrchestrator:
     # =========================================================================
     # Automatic multi-agent dispatch
     # =========================================================================
-    def _dispatch_agent_async(self, batch: BatchRecord, stage_key: str, artifact_path: Optional[str]):
+    def _dispatch_agent_async(
+        self,
+        batch: BatchRecord,
+        stage_key: str,
+        artifact_path: Optional[str],
+        extra_paths: Optional[List[str]] = None,
+    ):
         """
         Fires the agent registered for `stage_key` against `artifact_path` on a
         background thread so the synchronous pipeline never blocks on the
-        external platform. Records the outcome on batch.agent_executions.
+        external platform. `extra_paths` are bundled into the same zip. Records
+        the outcome on batch.agent_executions.
         """
         agent = agentic_anomaly_service.agent_bridge.get_agent_for_stage(stage_key)
         if not agent:
@@ -737,16 +884,26 @@ class PipelineOrchestrator:
 
         execution.status = "SUBMITTING"
         execution.target_file = Path(artifact_path).name
+        extras = [Path(p) for p in (extra_paths or []) if p]
 
         threading.Thread(
             target=self._submit_agent_job,
-            args=(batch.batch_id, stage_key, Path(artifact_path), agent["id"]),
+            args=(batch.batch_id, stage_key, Path(artifact_path), agent["id"], extras),
             daemon=True,
             name=f"agent-{stage_key}-{batch.batch_id}",
         ).start()
 
-    def _submit_agent_job(self, batch_id: str, stage_key: str, artifact: Path, agent_id: str):
-        result = agentic_anomaly_service.agent_bridge.submit_batch_to_agent(artifact, agent_id=agent_id)
+    def _submit_agent_job(
+        self,
+        batch_id: str,
+        stage_key: str,
+        artifact: Path,
+        agent_id: str,
+        extras: Optional[List[Path]] = None,
+    ):
+        result = agentic_anomaly_service.agent_bridge.submit_batch_to_agent(
+            artifact, agent_id=agent_id, extra_files=extras
+        )
 
         with self._lock:
             batch = self.batches.get(batch_id)
@@ -762,9 +919,24 @@ class PipelineOrchestrator:
             execution.message = result.get("message")
             execution.http_status = str(result.get("http_status"))
             execution.submitted_at = result.get("submitted_at")
+            execution.bundled_files = list(result.get("bundled_files") or [artifact.name])
             execution.status = "SUBMITTED" if execution.success else "FAILED"
             batch.agent_execution = execution.model_dump()
             batch.updated_at = self._now()
+
+            if stage_key == "STAGE_1_FORECAST":
+                if execution.success and execution.agent_execution_id:
+                    if batch.agent_forecast:
+                        batch.agent_forecast.agent_execution_id = execution.agent_execution_id
+                    threading.Thread(
+                        target=self._await_forecast,
+                        args=(batch_id,),
+                        daemon=True,
+                        name=f"forecast-poll-{batch_id}",
+                    ).start()
+                elif batch.agent_forecast:
+                    batch.agent_forecast.status = "FAILED"
+                    batch.agent_forecast.message = execution.message
 
     def refresh_agent_outputs(self, batch_id: str) -> Dict[str, AgentExecution]:
         """
@@ -776,26 +948,222 @@ class PipelineOrchestrator:
             raise KeyError(f"Batch '{batch_id}' not found.")
 
         batch = self.batches[batch_id]
-        bridge = agentic_anomaly_service.agent_bridge
-
-        for execution in batch.agent_executions.values():
-            if not execution.agent_execution_id:
-                continue
-            if execution.status in TERMINAL_AGENT_STATES:
-                continue
-
-            data = bridge.get_agent_execution_output(execution.agent_execution_id)
-            if not data.get("success"):
-                execution.message = data.get("message") or execution.message
-                continue
-
-            execution.output = data.get("output")
-            execution.status = (data.get("status") or "IN_PROGRESS").upper()
-            if execution.status in TERMINAL_AGENT_STATES:
-                execution.completed_at = data.get("modifiedAt") or self._now()
+        for execution in list(batch.agent_executions.values()):
+            self._refresh_one(batch, execution)
 
         batch.updated_at = self._now()
         return batch.agent_executions
+
+    def _refresh_one(self, batch: BatchRecord, execution: AgentExecution) -> bool:
+        """
+        One platform poll for one execution. Shared by the console endpoint and
+        the server-side forecast poller, so the two cannot drift; mutation is
+        under the lock because both can hit the same execution at once.
+        Returns True once the execution is terminal.
+        """
+        if not execution.agent_execution_id:
+            return execution.status in TERMINAL_AGENT_STATES or execution.status == "SKIPPED"
+        if execution.status in TERMINAL_AGENT_STATES:
+            return True
+
+        data = agentic_anomaly_service.agent_bridge.get_agent_execution_output(execution.agent_execution_id)
+
+        with self._lock:
+            if not data.get("success"):
+                execution.message = data.get("message") or execution.message
+                return False
+
+            execution.output = data.get("output")
+            execution.status = (data.get("status") or "IN_PROGRESS").upper()
+            terminal = execution.status in TERMINAL_AGENT_STATES
+            if terminal:
+                execution.completed_at = data.get("modifiedAt") or self._now()
+                if execution.stage == "STAGE_1_FORECAST" and not execution.forecast_captured:
+                    self._capture_forecast(batch, execution)
+            return terminal
+
+    # =========================================================================
+    # Forecast capture — closes the loop without a browser
+    # =========================================================================
+    def _await_forecast(self, batch_id: str):
+        """
+        Bounded poll for the forecast result. Stops on a terminal state or
+        after forecast_poll_max_attempts, marking the forecast TIMED_OUT so the
+        history row never carries an imputed value.
+        """
+        for _ in range(settings.forecast_poll_max_attempts):
+            time.sleep(settings.forecast_poll_seconds)
+            batch = self.batches.get(batch_id)
+            if not batch:
+                return
+            execution = batch.agent_executions.get("STAGE_1_FORECAST")
+            if not execution or not execution.agent_execution_id:
+                return
+            try:
+                if self._refresh_one(batch, execution):
+                    return
+            except Exception as e:
+                logger.warning(f"Forecast poll failed for {batch_id}: {e}")
+
+        with self._lock:
+            batch = self.batches.get(batch_id)
+            if batch and batch.agent_forecast and batch.agent_forecast.status == "PENDING":
+                batch.agent_forecast.status = "TIMED_OUT"
+                batch.agent_forecast.message = (
+                    f"No result after {settings.forecast_poll_max_attempts} polls; "
+                    "the history row keeps a blank forecast rather than a guess."
+                )
+                self._attach_forecast_to_history(batch)
+
+    def _capture_forecast(self, batch: BatchRecord, execution: AgentExecution):
+        """Parses the agent's answer into BatchForecast and records it in the history. Idempotent."""
+        execution.forecast_captured = True
+        forecast = batch.agent_forecast or BatchForecast()
+        forecast.agent_execution_id = execution.agent_execution_id
+        forecast.received_at = self._now()
+
+        if execution.status not in ("SUCCESS", "COMPLETED"):
+            forecast.status = "FAILED"
+            forecast.message = execution.message or f"Agent execution ended {execution.status}."
+            batch.agent_forecast = forecast
+            self._attach_forecast_to_history(batch)
+            return
+
+        parsed = self._parse_forecast_output(execution.output)
+        if not parsed or parsed.get("forecast_seconds") is None:
+            forecast.status = "UNPARSEABLE"
+            forecast.message = (
+                "The agent replied, but not with the JSON contract in AGENTS.md; "
+                "see the raw output. Nothing was recorded as a prediction."
+            )
+            batch.agent_forecast = forecast
+            self._attach_forecast_to_history(batch)
+            return
+
+        forecast.status = "RECEIVED"
+        forecast.message = None
+        forecast.forecast_seconds = parsed.get("forecast_seconds")
+        forecast.p10_seconds = parsed.get("p10_seconds")
+        forecast.p90_seconds = parsed.get("p90_seconds")
+        forecast.confidence = parsed.get("confidence")
+        forecast.breach_probability_pct = parsed.get("breach_probability_pct")
+        forecast.expected_escalation_rate_pct = parsed.get("expected_escalation_rate_pct")
+        forecast.dominant_uncertainty = parsed.get("dominant_uncertainty")
+        forecast.comparable_batches = parsed.get("comparable_batches") or []
+        forecast.reasoning = parsed.get("reasoning")
+        forecast.dashboard_line = parsed.get("dashboard_line")
+        batch.agent_forecast = forecast
+        self._attach_forecast_to_history(batch)
+        self._score_forecast(batch)
+
+    def _attach_forecast_to_history(self, batch: BatchRecord):
+        if not batch.agent_forecast:
+            return
+        try:
+            run_history_service.attach_forecast(batch.batch_id, batch.agent_forecast)
+        except Exception as e:
+            logger.error(f"Could not attach forecast to history for {batch.batch_id}: {e}")
+
+    def _score_forecast(self, batch: BatchRecord):
+        """Signed error vs measured wall-clock, once both exist and the batch is not parked."""
+        f = batch.agent_forecast
+        if not f or f.status != "RECEIVED" or f.forecast_seconds is None:
+            return
+        if self._is_parked(batch.batch_id) or not batch.wall_seconds:
+            return
+        f.error_pct = round((f.forecast_seconds - batch.wall_seconds) / batch.wall_seconds * 100.0, 1)
+
+    @staticmethod
+    def _parse_forecast_output(raw: Any) -> Optional[Dict[str, Any]]:
+        """
+        Tolerant reader for the forecast contract: a dict, a JSON string, a
+        ```json-fenced string, or JSON embedded in prose. Anything else → None,
+        never an exception. Numeric fields are coerced; garbage in a field is
+        dropped rather than trusted.
+        """
+        obj: Any = raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+            candidate = fenced.group(1).strip() if fenced else text
+            if not candidate.startswith("{"):
+                start, end = candidate.find("{"), candidate.rfind("}")
+                if start == -1 or end == -1 or end <= start:
+                    return None
+                candidate = candidate[start:end + 1]
+            try:
+                obj = json.loads(candidate)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(obj, dict):
+            return None
+
+        def num(key: str) -> Optional[float]:
+            v = obj.get(key)
+            if v is None or isinstance(v, bool):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def text(key: str) -> Optional[str]:
+            v = obj.get(key)
+            return str(v) if v is not None and not isinstance(v, (dict, list)) else None
+
+        comparables = obj.get("comparable_batches")
+        if not isinstance(comparables, list):
+            comparables = []
+
+        return {
+            "forecast_seconds": num("forecast_seconds"),
+            "p10_seconds": num("p10_seconds"),
+            "p90_seconds": num("p90_seconds"),
+            "confidence": text("confidence"),
+            "breach_probability_pct": num("breach_probability_pct"),
+            "expected_escalation_rate_pct": num("expected_escalation_rate_pct"),
+            "dominant_uncertainty": text("dominant_uncertainty"),
+            "comparable_batches": [str(c) for c in comparables][:20],
+            "reasoning": text("reasoning"),
+            "dashboard_line": text("dashboard_line"),
+        }
+
+    def get_forecast_comparison(self, batch_id: str) -> ForecastComparison:
+        if batch_id not in self.batches:
+            raise KeyError(f"Batch '{batch_id}' not found.")
+        batch = self.batches[batch_id]
+        if not batch.time_estimate:
+            raise ValueError(f"No estimate available for '{batch_id}'.")
+
+        actual = None
+        if batch.wall_seconds is not None:
+            actual = {
+                "machine_seconds": batch.machine_seconds,
+                "queue_wait_seconds": batch.queue_wait_seconds,
+                "wall_seconds": batch.wall_seconds,
+                "still_parked": False,
+            }
+        if self._is_parked(batch_id):
+            # Show the live wait so the operator sees the budget burning.
+            machine, queue, wall = self._clock_read(batch_id)
+            actual = {
+                "machine_seconds": round(machine, 3),
+                "queue_wait_seconds": round(queue, 3),
+                "wall_seconds": round(wall, 3),
+                "still_parked": True,
+            }
+
+        return ForecastComparison(
+            batch_id=batch_id,
+            stage=batch.stage,
+            local_estimate=batch.time_estimate,
+            agent_forecast=batch.agent_forecast,
+            execution=batch.agent_executions.get("STAGE_1_FORECAST"),
+            actual=actual,
+            calibration=time_estimator_service.calibration_summary(),
+        )
 
     def trigger_agent_classification(
         self,
@@ -811,7 +1179,7 @@ class PipelineOrchestrator:
             raise KeyError(f"Batch '{batch_id}' not found.")
 
         batch = self.batches[batch_id]
-        artifact = self._artifact_for_stage(batch, stage_key)
+        artifact, extras = self._bundle_for_stage(batch, stage_key)
         if not artifact:
             raise FileNotFoundError(
                 f"No input artefact available on disk for stage '{stage_key}' of batch '{batch_id}'."
@@ -837,21 +1205,29 @@ class PipelineOrchestrator:
             target_file=artifact.name,
         )
         batch.agent_executions[stage_key] = execution
+        if stage_key == "STAGE_1_FORECAST":
+            batch.agent_forecast = BatchForecast(status="PENDING", issued_at=self._now())
 
-        self._submit_agent_job(batch_id, stage_key, artifact, resolved_agent_id)
+        self._submit_agent_job(batch_id, stage_key, artifact, resolved_agent_id, extras)
         return batch.agent_executions[stage_key]
 
-    def _artifact_for_stage(self, batch: BatchRecord, stage_key: str) -> Optional[Path]:
-        mapping = {
-            "STAGE_1_EXTRACTION": batch.batch_file_path,
-            "STAGE_4_ANOMALY": batch.anomaly_file_path or batch.batch_file_path,
-            "STAGE_6_RECON": batch.ambiguous_file_path or batch.unmatched_file_path,
-            "STAGE_7_SLA": batch.sla_metrics_file_path,
+    def _bundle_for_stage(self, batch: BatchRecord, stage_key: str) -> Tuple[Optional[Path], List[Path]]:
+        """
+        (primary artefact, extra members) for a stage. One place for the
+        mapping so a manual retry sends exactly the bundle the automatic
+        dispatch did.
+        """
+        mapping: Dict[str, Tuple[Optional[str], List[Optional[str]]]] = {
+            "STAGE_1_FORECAST": (batch.forecast_input_file_path, [batch.run_history_file_path]),
+            "STAGE_1_EXTRACTION": (batch.batch_file_path, []),
+            "STAGE_4_ANOMALY": (batch.anomaly_file_path or batch.batch_file_path, []),
+            "STAGE_6_RECON": (batch.ambiguous_file_path or batch.unmatched_file_path, []),
+            "STAGE_7_SLA": (batch.sla_metrics_file_path, []),
         }
-        candidate = mapping.get(stage_key)
-        if candidate and Path(candidate).exists():
-            return Path(candidate)
-        return None
+        primary, extras = mapping.get(stage_key, (None, []))
+        if not primary or not Path(primary).exists():
+            return None, []
+        return Path(primary), [Path(p) for p in extras if p and Path(p).exists()]
 
     # =========================================================================
     # Read models

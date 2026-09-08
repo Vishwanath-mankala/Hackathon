@@ -102,6 +102,22 @@ class CrewAIAgentBridge:
         """
         roster = [
             {
+                "key": "CREWAI_AGENT_FORECAST_ID",
+                "id": settings.crewai_agent_forecast_id,
+                "stage_key": "STAGE_1_FORECAST",
+                "name": "Processing Time Forecast & Calibration Analyst",
+                "role": "Senior Batch Capacity & Forecasting Analyst",
+                "stage": "Stage 1: Processing Time Forecast",
+                "description": (
+                    "Predicts this batch's processing time and SLA breach risk before it is processed, "
+                    "from its ingest-time features and the run history of comparable batches."
+                ),
+                "input_artifact": "{batch_id}_forecast_input.csv + {batch_id}_run_history.csv",
+                "auto_dispatch": True,
+                "human_intervention": False,
+                "is_default": False,
+            },
+            {
                 "key": "CREWAI_AGENT_ANOMALY_ID",
                 "id": settings.crewai_agent_anomaly_id,
                 "stage_key": "STAGE_4_ANOMALY",
@@ -177,17 +193,57 @@ class CrewAIAgentBridge:
     def get_agent_for_stage(self, stage_key: str) -> Optional[Dict[str, Any]]:
         return next((a for a in self.get_configured_agents() if a["stage_key"] == stage_key), None)
 
-    def submit_batch_to_agent(self, file_path: Path, agent_id: Optional[str] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _zip_members(file_path: Path, extra_files: Optional[List[Path]]) -> List[Path]:
         """
-        Submits bank statement CSV or candidate anomaly CSV directly to the external Agent API
-        (https://int-ai.aava.ai/agents/execute/agent-executions) using multipart/form-data.
+        The primary artefact plus any extras, deduplicated by resolved path and
+        by archive name (zipfile happily writes two members with one name and
+        some readers choke on it). A missing extra is skipped with a warning
+        rather than failing the submission — the first batch ever has no
+        history to bundle, and its forecast should still go out.
         """
+        members: List[Path] = []
+        seen_paths = set()
+        seen_names = set()
+        for candidate in [file_path] + list(extra_files or []):
+            p = Path(candidate)
+            if not p.exists():
+                if p != file_path:
+                    logger.warning(f"Bundle member {p.name} does not exist; submitting without it.")
+                continue
+            key = str(p.resolve())
+            if key in seen_paths or p.name in seen_names:
+                continue
+            seen_paths.add(key)
+            seen_names.add(p.name)
+            members.append(p)
+        return members
+
+    def submit_batch_to_agent(
+        self,
+        file_path: Path,
+        agent_id: Optional[str] = None,
+        extra_files: Optional[List[Path]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Submits a stage artefact to the external Agent API
+        (https://int-ai.aava.ai/agents/execute/agent-executions) as multipart/form-data.
+
+        `file_path` is the primary artefact: it names the zip and is reported as
+        `target_file`. `extra_files` ride along as further members of the same
+        zip — the Stage 1 forecast bundles its history snapshot this way.
+        """
+        members = self._zip_members(file_path, extra_files)
+        bundled = [m.name for m in members]
+
         if not self.is_enabled():
             return {
                 "success": False,
                 "message": "External Agent API not enabled or URL not configured.",
                 "http_status": "DISABLED",
-                "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "target_file": file_path.name,
+                "bundled_files": bundled,
             }
 
         target_agent_id = agent_id or self.agent_id
@@ -201,6 +257,7 @@ class CrewAIAgentBridge:
                 "http_status": "NOT_CONFIGURED",
                 "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "target_file": file_path.name,
+                "bundled_files": bundled,
                 "agent_id": None,
             }
         target_agent_id = str(target_agent_id)
@@ -221,7 +278,8 @@ class CrewAIAgentBridge:
 
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(file_path, arcname=file_path.name)
+                for member in members:
+                    zf.write(member, arcname=member.name)
             zip_bytes = zip_buf.getvalue()
 
             files = {
@@ -246,6 +304,7 @@ class CrewAIAgentBridge:
                     "http_status": res_data.get("httpStatus", "OK"),
                     "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                     "target_file": file_path.name,
+                    "bundled_files": bundled,
                     "agent_id": target_agent_id
                 }
             else:
@@ -256,6 +315,7 @@ class CrewAIAgentBridge:
                     "message": f"Agent platform returned HTTP {resp.status_code}: {resp.text[:200]}",
                     "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                     "target_file": file_path.name,
+                    "bundled_files": bundled,
                     "agent_id": target_agent_id
                 }
         except Exception as e:
@@ -266,6 +326,7 @@ class CrewAIAgentBridge:
                 "message": f"Connection error: {str(e)}",
                 "submitted_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "target_file": file_path.name,
+                "bundled_files": bundled,
                 "agent_id": target_agent_id
             }
 

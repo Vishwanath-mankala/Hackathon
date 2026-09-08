@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ingestion_storage_dir: Path = PROJECT_ROOT / "data" / "ingestion_storage"
     batch_results_dir: Path = PROJECT_ROOT / "data" / "batch_results"
     sla_metrics_dir: Path = PROJECT_ROOT / "data" / "sla_metrics"
+    # Stage 1 forecast inputs, per-batch history snapshots and the master
+    # run_history.csv — the knowledge base the estimator calibrates from and the
+    # forecast agent reasons over. Point it at persistent storage in deployment.
+    forecast_dir: Path = PROJECT_ROOT / "data" / "forecasts"
     sftp_dir: Path = PROJECT_ROOT / "incoming_sftp"
 
     # Server Settings
@@ -58,7 +62,8 @@ class Settings(BaseSettings):
     # stands.
     # =========================================================================
     crewai_agent_id: Optional[str] = None            # optional global fallback
-    crewai_agent_anomaly_id: Optional[str] = 57977   # Stage 4 Anomaly Classification & Risk Scoring
+    crewai_agent_forecast_id: Optional[str] = None   # Stage 1 Processing Time Forecast (history-aware)
+    crewai_agent_anomaly_id: Optional[str] = None    # Stage 4 Anomaly Classification & Risk Scoring
     crewai_agent_sla_id: Optional[str] = None        # Stage 7 SLA Analysis & Urgency Classification
     crewai_agent_recon_id: Optional[str] = None      # Stage 6 Reconciliation & Exception Verification
     crewai_agent_extraction_id: Optional[str] = None # Stage 1 Ingestion & Statement Data Extraction
@@ -74,6 +79,21 @@ class Settings(BaseSettings):
     # Auto-ingest every statement waiting in incoming_sftp/ at application start
     # (ARCHITECTURE.md Stage 1: "Automated directory polling for incoming SFTP drops").
     sftp_auto_ingest: bool = True
+
+    # =========================================================================
+    # Processing-time calibration & forecast
+    #
+    # The estimator derives its throughput and per-escalation queue-wait from
+    # the run history rather than trusting a laptop-measured constant. It only
+    # does so once enough runs of a meaningful size exist; tiny test batches
+    # sit on the formula's floors and carry no timing signal.
+    # =========================================================================
+    calibration_min_runs: int = 5          # eligible runs before HISTORY replaces DEFAULT
+    calibration_min_records: int = 200     # runs smaller than this are floor noise
+    calibration_window: int = 50           # most recent eligible runs considered
+    forecast_history_rows: int = 60        # rows of history bundled for the forecast agent
+    forecast_poll_seconds: float = 10.0    # server-side poll interval for a forecast result
+    forecast_poll_max_attempts: int = 90   # ~15 minutes, then TIMED_OUT
 
     # One env file for the whole backend, at the repo root next to .env.example.
     # It used to also load backend/.env and the CWD-relative ".env", which meant a
@@ -123,6 +143,7 @@ for _d in (
     settings.quarantine_dir,
     settings.batch_results_dir,
     settings.sla_metrics_dir,
+    settings.forecast_dir,
     settings.sftp_dir,
 ):
     _d.mkdir(parents=True, exist_ok=True)
