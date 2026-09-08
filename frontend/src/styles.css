@@ -144,3 +144,44 @@ table {
 th, td {
   border: 1px solid var(--border-default);
 }
+
+/* ══════════════════════════════════════════════════════════
+   Motion primitives — page entry + skeleton shimmer
+   ══════════════════════════════════════════════════════════ */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 180ms ease-out both;
+}
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Neutral placeholder bar. Uses theme tokens so it reads correctly
+   in both light and dark, and stays legible with reduced motion. */
+.skeleton {
+  background-color: var(--bg-surface-sunken);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--border-default) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .skeleton,
+  .animate-spin,
+  .animate-pulse {
+    animation: none !important;
+  }
+  .skeleton { background-image: none; }
+}

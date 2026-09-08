@@ -57,6 +57,10 @@ data/ingestion_storage/*
 !data/ingestion_storage/.gitkeep
 data/quarantined_batches/*
 !data/quarantined_batches/.gitkeep
+data/batch_results/*
+!data/batch_results/.gitkeep
+data/sla_metrics/*
+!data/sla_metrics/.gitkeep
 File-Gen Scripts/OutPut/
 
 # =============================================================================

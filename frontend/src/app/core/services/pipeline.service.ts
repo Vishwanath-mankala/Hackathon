@@ -1,6 +1,6 @@
-import { Injectable, inject, signal } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, tap } from 'rxjs';
+import { Injectable, inject, signal, computed } from '@angular/core';
+import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
+import { Observable, catchError, finalize, tap, throwError } from 'rxjs';
 import {
   PipelineOverview,
   BatchRecord,
@@ -9,8 +9,28 @@ import {
   AnomalyItem,
   HumanResolveRequest,
   TimeEstimate,
-  PublishEvent
+  PublishEvent,
+  AgentExecution,
+  AgentStatusResponse,
+  ArtifactKind,
+  BatchReconResponse,
+  ConfiguredAgent
 } from '../models/pipeline.models';
+
+/** Turns any transport/HTTP failure into a message worth showing an operator. */
+export function describeHttpError(err: unknown): string {
+  const e = err as HttpErrorResponse;
+  if (e?.error?.detail) {
+    return typeof e.error.detail === 'string' ? e.error.detail : JSON.stringify(e.error.detail);
+  }
+  if (e?.status === 0) {
+    return 'Backend unreachable at http://localhost:8000 — the API is not responding.';
+  }
+  if (e?.status) {
+    return `API returned HTTP ${e.status} ${e.statusText || ''}`.trim();
+  }
+  return (e as any)?.message || 'Unknown error contacting the pipeline API.';
+}
 
 @Injectable({
   providedIn: 'root'
@@ -19,27 +39,64 @@ export class PipelineService {
   private http = inject(HttpClient);
   private readonly baseUrl = 'http://localhost:8000/api/pipeline';
 
-  // State signals
+  // ---- Data state (populated only from API responses) -----------------------
   readonly overview = signal<PipelineOverview | null>(null);
   readonly batches = signal<BatchRecord[]>([]);
   readonly selectedBatchId = signal<string | null>(null);
   readonly selectedBatch = signal<BatchRecord | null>(null);
   readonly currentAnomalies = signal<AnomalyItem[]>([]);
   readonly publishedEvents = signal<PublishEvent[]>([]);
+  readonly agentExecutions = signal<Record<string, AgentExecution>>({});
+  readonly configuredAgents = signal<ConfiguredAgent[]>([]);
+
+  // ---- Request state --------------------------------------------------------
+  readonly overviewLoading = signal<boolean>(false);
+  readonly overviewError = signal<string | null>(null);
+
+  readonly anomaliesLoading = signal<boolean>(false);
+  readonly anomaliesError = signal<string | null>(null);
+
+  readonly eventsLoading = signal<boolean>(false);
+  readonly eventsError = signal<string | null>(null);
+
+  readonly agentsLoading = signal<boolean>(false);
+  readonly agentsError = signal<string | null>(null);
+
   readonly isProcessing = signal<boolean>(false);
+
+  /** True while any pipeline request is in flight — drives the global header indicator. */
+  readonly busy = computed(() =>
+    this.overviewLoading() ||
+    this.anomaliesLoading() ||
+    this.eventsLoading() ||
+    this.agentsLoading() ||
+    this.isProcessing()
+  );
 
   // --------------------------------------------------------------------------
   // Overview & Batches
   // --------------------------------------------------------------------------
   loadOverview(): Observable<PipelineOverview> {
+    this.overviewLoading.set(true);
+    this.overviewError.set(null);
+
     return this.http.get<PipelineOverview>(`${this.baseUrl}/overview`).pipe(
       tap(ov => {
         this.overview.set(ov);
         this.batches.set(ov.batches);
-        if (!this.selectedBatchId() && ov.batches.length > 0) {
+        const current = this.selectedBatchId();
+        const stillPresent = current && ov.batches.some(b => b.batch_id === current);
+        if (!stillPresent && ov.batches.length > 0) {
           this.selectBatch(ov.batches[0].batch_id);
         }
-      })
+      }),
+      catchError(err => {
+        this.overviewError.set(describeHttpError(err));
+        this.overview.set(null);
+        this.batches.set([]);
+        return throwError(() => err);
+      }),
+      finalize(() => this.overviewLoading.set(false))
     );
   }
 
@@ -54,21 +111,20 @@ export class PipelineService {
   selectBatch(batchId: string): void {
     this.selectedBatchId.set(batchId);
     const found = this.batches().find(b => b.batch_id === batchId);
-    if (found) {
-      this.selectedBatch.set(found);
-    }
-    this.loadBatchDetails(batchId).subscribe();
-    this.loadBatchAnomalies(batchId).subscribe();
+    this.selectedBatch.set(found ?? null);
   }
 
   loadBatchDetails(batchId: string): Observable<BatchRecord> {
     return this.http.get<BatchRecord>(`${this.baseUrl}/batches/${batchId}`).pipe(
-      tap(b => this.selectedBatch.set(b))
+      tap(b => {
+        this.selectedBatch.set(b);
+        this.agentExecutions.set(b.agent_executions || {});
+      })
     );
   }
 
   // --------------------------------------------------------------------------
-  // Ingestion & Simulation
+  // Ingestion
   // --------------------------------------------------------------------------
   ingestFile(
     file: File,
@@ -80,14 +136,21 @@ export class PipelineService {
     const formData = new FormData();
     formData.append('file', file, file.name);
     formData.append('source', source);
-    if (declaredCount !== undefined) formData.append('declared_record_count', declaredCount.toString());
-    if (declaredTotal !== undefined) formData.append('declared_control_total', declaredTotal.toString());
+    if (declaredCount !== undefined && declaredCount !== null) {
+      formData.append('declared_record_count', declaredCount.toString());
+    }
+    if (declaredTotal !== undefined && declaredTotal !== null) {
+      formData.append('declared_control_total', declaredTotal.toString());
+    }
 
     return this.http.post<IngestionResponse>(`${this.baseUrl}/ingest`, formData).pipe(
-      tap(() => {
-        this.isProcessing.set(false);
-        this.loadOverview().subscribe();
-      })
+      tap(res => {
+        this.loadOverview().subscribe({
+          next: () => this.selectBatch(res.batch_id),
+          error: () => {}
+        });
+      }),
+      finalize(() => this.isProcessing.set(false))
     );
   }
 
@@ -98,11 +161,12 @@ export class PipelineService {
 
     return this.http.post<IngestionResponse>(`${this.baseUrl}/simulate-sftp`, null, { params }).pipe(
       tap(res => {
-        this.isProcessing.set(false);
         this.loadOverview().subscribe({
-          next: () => this.selectBatch(res.batch_id)
+          next: () => this.selectBatch(res.batch_id),
+          error: () => {}
         });
-      })
+      }),
+      finalize(() => this.isProcessing.set(false))
     );
   }
 
@@ -117,12 +181,21 @@ export class PipelineService {
   // Anomalies & Human Escalation
   // --------------------------------------------------------------------------
   loadBatchAnomalies(batchId: string, status?: string, severity?: string): Observable<AnomalyItem[]> {
+    this.anomaliesLoading.set(true);
+    this.anomaliesError.set(null);
+
     let params = new HttpParams();
     if (status) params = params.set('status', status);
     if (severity) params = params.set('severity', severity);
 
     return this.http.get<AnomalyItem[]>(`${this.baseUrl}/batches/${batchId}/anomalies`, { params }).pipe(
-      tap(items => this.currentAnomalies.set(items))
+      tap(items => this.currentAnomalies.set(items)),
+      catchError(err => {
+        this.anomaliesError.set(describeHttpError(err));
+        this.currentAnomalies.set([]);
+        return throwError(() => err);
+      }),
+      finalize(() => this.anomaliesLoading.set(false))
     );
   }
 
@@ -137,8 +210,9 @@ export class PipelineService {
     ).pipe(
       tap(updatedBatch => {
         this.selectedBatch.set(updatedBatch);
-        this.loadBatchAnomalies(batchId).subscribe();
-        this.loadOverview().subscribe();
+        this.agentExecutions.set(updatedBatch.agent_executions || {});
+        this.loadBatchAnomalies(batchId).subscribe({ error: () => {} });
+        this.loadOverview().subscribe({ error: () => {} });
       })
     );
   }
@@ -146,8 +220,8 @@ export class PipelineService {
   // --------------------------------------------------------------------------
   // GL Reconciliation Results
   // --------------------------------------------------------------------------
-  loadReconciliation(batchId: string): Observable<any> {
-    return this.http.get<any>(`${this.baseUrl}/batches/${batchId}/recon`);
+  loadReconciliation(batchId: string): Observable<BatchReconResponse> {
+    return this.http.get<BatchReconResponse>(`${this.baseUrl}/batches/${batchId}/recon`);
   }
 
   // --------------------------------------------------------------------------
@@ -163,53 +237,81 @@ export class PipelineService {
   publishBatch(batchId: string): Observable<PublishEvent> {
     return this.http.post<PublishEvent>(`${this.baseUrl}/batches/${batchId}/publish`, {}).pipe(
       tap(() => {
-        this.loadOverview().subscribe();
-        this.loadPublishEvents().subscribe();
+        this.loadOverview().subscribe({ error: () => {} });
+        this.loadPublishEvents().subscribe({ error: () => {} });
       })
     );
   }
 
   loadPublishEvents(): Observable<PublishEvent[]> {
+    this.eventsLoading.set(true);
+    this.eventsError.set(null);
+
     return this.http.get<PublishEvent[]>(`${this.baseUrl}/publish/events`).pipe(
-      tap(evts => this.publishedEvents.set(evts))
+      tap(evts => this.publishedEvents.set(evts)),
+      catchError(err => {
+        this.eventsError.set(describeHttpError(err));
+        this.publishedEvents.set([]);
+        return throwError(() => err);
+      }),
+      finalize(() => this.eventsLoading.set(false))
     );
   }
 
   // --------------------------------------------------------------------------
-  // Agent Platform Integration (Aava AI / CrewAI)
+  // Multi-Agent Platform (Aava AI / CrewAI)
+  //
+  // Stage 4, 6 and 7 agents are dispatched automatically by the backend as
+  // their input artefacts are produced. The console only observes them; the
+  // manual re-dispatch below exists to retry a failed submission.
   // --------------------------------------------------------------------------
-  triggerAgentClassification(batchId: string, useAnomaliesFile: boolean = true, agentId?: string): Observable<any> {
-    let params = new HttpParams().set('use_anomalies_file', useAnomaliesFile.toString());
-    if (agentId) {
-      params = params.set('agent_id', agentId);
-    }
-    return this.http.post<any>(`${this.baseUrl}/batches/${batchId}/agent/classify`, {}, { params }).pipe(
-      tap(() => {
-        this.loadBatchDetails(batchId).subscribe();
-        this.loadBatchAnomalies(batchId).subscribe();
-      })
+  loadAgentStatus(batchId: string): Observable<AgentStatusResponse> {
+    this.agentsLoading.set(true);
+    this.agentsError.set(null);
+
+    return this.http.get<AgentStatusResponse>(`${this.baseUrl}/batches/${batchId}/agent/status`).pipe(
+      tap(res => this.agentExecutions.set(res.executions || {})),
+      catchError(err => {
+        this.agentsError.set(describeHttpError(err));
+        this.agentExecutions.set({});
+        return throwError(() => err);
+      }),
+      finalize(() => this.agentsLoading.set(false))
     );
   }
 
-  loadBatchAgentStatus(batchId: string): Observable<any> {
-    return this.http.get<any>(`${this.baseUrl}/batches/${batchId}/agent/status`);
+  /** Polls the agent platform for output on every in-flight execution of a batch. */
+  refreshAgentOutputs(batchId: string): Observable<Record<string, AgentExecution>> {
+    return this.http.get<Record<string, AgentExecution>>(
+      `${this.baseUrl}/batches/${batchId}/agent/output`
+    ).pipe(
+      tap(execs => this.agentExecutions.set(execs || {}))
+    );
   }
 
-  loadBatchAgentOutput(batchId: string): Observable<any> {
-    return this.http.get<any>(`${this.baseUrl}/batches/${batchId}/agent/output`);
+  redispatchAgent(batchId: string, stageKey: string, agentId?: string): Observable<AgentExecution> {
+    let params = new HttpParams().set('stage_key', stageKey);
+    if (agentId) params = params.set('agent_id', agentId);
+
+    return this.http.post<AgentExecution>(
+      `${this.baseUrl}/batches/${batchId}/agent/classify`,
+      {},
+      { params }
+    ).pipe(
+      tap(() => this.loadAgentStatus(batchId).subscribe({ error: () => {} }))
+    );
   }
 
-  getBatchFileUrl(batchId: string): string {
-    return `${this.baseUrl}/batches/${batchId}/file`;
+  loadConfiguredAgents(): Observable<ConfiguredAgent[]> {
+    return this.http.get<ConfiguredAgent[]>(`${this.baseUrl}/agent/available-agents`).pipe(
+      tap(agents => this.configuredAgents.set(agents))
+    );
   }
 
-  getAnomalyFileUrl(batchId: string): string {
-    return `${this.baseUrl}/batches/${batchId}/anomalies/file`;
-  }
-
-  loadAvailableAgents(): Observable<any[]> {
-    return this.http.get<any[]>(`${this.baseUrl}/agent/available-agents`);
+  // --------------------------------------------------------------------------
+  // Artefact downloads
+  // --------------------------------------------------------------------------
+  getArtifactUrl(batchId: string, kind: ArtifactKind): string {
+    return `${this.baseUrl}/batches/${batchId}/artifacts/${kind}`;
   }
 }
-
-

@@ -24,9 +24,14 @@ class Settings(BaseSettings):
     manifest_path: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "ingestion_batches" / "manifest.csv"
     cache_path: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "cache_gl_cashbook.csv"
     results_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "recon_results"
-    quarantine_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "recon_results" / "quarantined_batches"
     anomalies_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "anomalies"
-    ingestion_storage_dir: Path = PROJECT_ROOT / "File-Gen Scripts" / "OutPut" / "ingestion_storage"
+
+    # Runtime batch artefact directories (written by the live pipeline)
+    quarantine_dir: Path = PROJECT_ROOT / "data" / "quarantined_batches"
+    ingestion_storage_dir: Path = PROJECT_ROOT / "data" / "ingestion_storage"
+    batch_results_dir: Path = PROJECT_ROOT / "data" / "batch_results"
+    sla_metrics_dir: Path = PROJECT_ROOT / "data" / "sla_metrics"
+    sftp_dir: Path = PROJECT_ROOT / "incoming_sftp"
 
     # Server Settings
     host: str = "0.0.0.0"
@@ -44,13 +49,21 @@ class Settings(BaseSettings):
 
     # Multi-Agent Specialized Role IDs
     crewai_agent_anomaly_id: str = "56800"      # Stage 4 Anomaly Classification & Risk Scoring
-    crewai_agent_sla_id: str = "55551"          # Stage 5 SLA Analysis & Urgency Classification
+    crewai_agent_sla_id: str = "55551"          # Stage 7 SLA Analysis & Urgency Classification
     crewai_agent_recon_id: str = "56797"        # Stage 6 Reconciliation & Exception Verification
     crewai_agent_extraction_id: str = "56231"   # Stage 2 Ingestion & Financial Statement Data Extraction
     crewai_agent_collab_id: str = "7723"        # Frontend Architecture Collab Agent
 
     crewai_workflow_id: Optional[str] = "reconciliation-multiagent-flow"
     crewai_timeout_seconds: float = 60.0
+
+    # Automatic (non-interactive) agent dispatch — Stage 4 / 6 / 7 agents are
+    # fired by the orchestrator as their input artefacts become available.
+    auto_agent_dispatch: bool = True
+
+    # Auto-ingest every statement waiting in incoming_sftp/ at application start
+    # (ARCHITECTURE.md Stage 1: "Automated directory polling for incoming SFTP drops").
+    sftp_auto_ingest: bool = True
 
     model_config = {
         "env_file": (PROJECT_ROOT / ".env", Path(__file__).resolve().parents[1] / ".env", ".env"),
@@ -60,5 +73,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-settings.anomalies_dir.mkdir(parents=True, exist_ok=True)
-settings.ingestion_storage_dir.mkdir(parents=True, exist_ok=True)
+
+for _d in (
+    settings.anomalies_dir,
+    settings.ingestion_storage_dir,
+    settings.quarantine_dir,
+    settings.batch_results_dir,
+    settings.sla_metrics_dir,
+    settings.sftp_dir,
+):
+    _d.mkdir(parents=True, exist_ok=True)

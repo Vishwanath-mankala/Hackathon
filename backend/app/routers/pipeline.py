@@ -8,6 +8,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app.models.pipeline_models import (
+    AgentExecution,
     BatchRecord,
     StructuralGateDetails,
     AnomalyItem,
@@ -21,9 +22,34 @@ from app.models.pipeline_models import (
 from app.services.pipeline_orchestrator import pipeline_orchestrator
 from app.services.publish_service import publish_service
 from app.services.ingestion_service import ingestion_service
+from app.services.recon_service import recon_service
+from app.models.recon import PaginatedQueryResponse
 from app.config import settings
 
 router = APIRouter(prefix="/api/pipeline", tags=["Pipeline Orchestrator"])
+
+# Stage artefacts downloadable through /batches/{id}/artifacts/{kind}
+ARTIFACT_FIELDS = {
+    "statement": ("batch_file_path", "text/csv"),
+    "anomaly_candidates": ("anomaly_file_path", "text/csv"),
+    "matched": ("matched_file_path", "text/csv"),
+    "unmatched_bank": ("unmatched_file_path", "text/csv"),
+    "outstanding_gl": ("outstanding_file_path", "text/csv"),
+    "recon_exceptions": ("ambiguous_file_path", "text/csv"),
+    "sla_metrics": ("sla_metrics_file_path", "text/csv"),
+}
+
+# Stage 6 result sets queryable through /batches/{id}/recon/{dataset}
+RECON_DATASETS = {
+    "matched": "_matched.csv",
+    "unmatched_bank": "_unmatched_bank.csv",
+    "outstanding_gl": "_outstanding_gl.csv",
+    "ambiguous": "_ambiguous.csv",
+}
+
+
+def _exists(path: Optional[str]) -> bool:
+    return bool(path and Path(path).exists())
 
 
 @router.get("/overview", response_model=PipelineOverview)
@@ -196,14 +222,23 @@ def get_batch_reconciliation(batch_id: str):
         raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
 
     batch = pipeline_orchestrator.batches[batch_id]
-    summary = batch.gl_summary
-    results = pipeline_orchestrator.batch_match_results.get(batch_id, {"matched": [], "unmatched_reconciling": []})
+    results = pipeline_orchestrator.batch_match_results.get(
+        batch_id, {"matched": [], "unmatched_reconciling": [], "ambiguous": []}
+    )
 
     return {
         "batch_id": batch_id,
-        "summary": summary,
-        "matched_sample": results["matched"][:100],
-        "unmatched_sample": results["unmatched_reconciling"][:100]
+        "summary": batch.gl_summary,
+        "matched_sample": results.get("matched", [])[:100],
+        "unmatched_sample": results.get("unmatched_reconciling", [])[:100],
+        "ambiguous_sample": results.get("ambiguous", [])[:100],
+        "artifacts": {
+            "matched": batch.matched_file_path,
+            "unmatched_bank": batch.unmatched_file_path,
+            "outstanding_gl": batch.outstanding_file_path,
+            "recon_exceptions": batch.ambiguous_file_path,
+            "sla_metrics": batch.sla_metrics_file_path,
+        },
     }
 
 
@@ -290,23 +325,25 @@ def download_anomaly_candidates_file(batch_id: str):
     )
 
 
-@router.post("/batches/{batch_id}/agent/classify")
+@router.post("/batches/{batch_id}/agent/classify", response_model=AgentExecution)
 def trigger_agent_classification(
     batch_id: str,
-    use_anomalies_file: bool = Query(True, description="Submit filtered anomaly candidate CSV if true, else full statement"),
-    agent_id: Optional[str] = Query(None, description="Aava AI Agent ID e.g. 7723 or 56800")
+    stage_key: str = Query("STAGE_4_ANOMALY", description="Pipeline stage whose agent should run"),
+    agent_id: Optional[str] = Query(None, description="Override the agent ID configured for the stage")
 ):
     """
-    Submits statement or candidate anomalies CSV to Aava AI Agent (ID 7723 or custom agent_id)
-    for Stage 4 Structural, Semantic, Timing, Referential classification & severity scoring.
+    Manually re-dispatches a stage's agent.
+
+    The pipeline already submits Stage 4, Stage 6 and Stage 7 agents automatically
+    as their input artefacts are produced — this endpoint exists to retry a
+    submission that failed, or to run a stage against a different agent ID.
     """
     try:
-        res = pipeline_orchestrator.trigger_agent_classification(
+        return pipeline_orchestrator.trigger_agent_classification(
             batch_id=batch_id,
-            use_anomalies_file=use_anomalies_file,
+            stage_key=stage_key,
             agent_id=agent_id
         )
-        return res
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
@@ -317,26 +354,30 @@ def trigger_agent_classification(
 
 @router.get("/batches/{batch_id}/agent/status")
 def get_batch_agent_status(batch_id: str):
-    """Retrieves external agent execution metadata and submission status for this batch."""
+    """Returns every automatic agent dispatch recorded against this batch."""
     if batch_id not in pipeline_orchestrator.batches:
         raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
     batch = pipeline_orchestrator.batches[batch_id]
     return {
         "batch_id": batch_id,
-        "agent_execution": batch.agent_execution,
-        "has_anomaly_file": bool(batch.anomaly_file_path and Path(batch.anomaly_file_path).exists()),
-        "has_batch_file": bool(batch.batch_file_path and Path(batch.batch_file_path).exists())
+        "executions": batch.agent_executions,
+        "artifacts": {
+            "anomaly_candidates": _exists(batch.anomaly_file_path),
+            "recon_exceptions": _exists(batch.ambiguous_file_path),
+            "sla_metrics": _exists(batch.sla_metrics_file_path),
+            "raw_statement": _exists(batch.batch_file_path),
+        },
     }
 
 
-@router.get("/batches/{batch_id}/agent/output")
-def get_batch_agent_output(batch_id: str):
+@router.get("/batches/{batch_id}/agent/output", response_model=Dict[str, AgentExecution])
+def refresh_batch_agent_outputs(batch_id: str):
     """
-    Fetches the live execution output from Aava AI history endpoint for this batch:
-    GET https://int-ai.aava.ai/agents/execute/history/execution?execution_id={execution_id}
+    Polls the agent platform for every in-flight execution on this batch and
+    returns the refreshed per-stage dispatch log.
     """
     try:
-        return pipeline_orchestrator.get_batch_agent_output(batch_id)
+        return pipeline_orchestrator.refresh_agent_outputs(batch_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -383,7 +424,7 @@ def get_available_agents():
     """
     Returns the configured multi-agent team and their role assignments:
     - Stage 4 Anomaly Classification (CREWAI_AGENT_ANOMALY_ID)
-    - Stage 5 SLA & Urgency (CREWAI_AGENT_SLA_ID)
+    - Stage 7 SLA & Urgency (CREWAI_AGENT_SLA_ID)
     - Stage 6 Exception Verification (CREWAI_AGENT_RECON_ID)
     - Stage 2 Ingestion & Extraction (CREWAI_AGENT_EXTRACTION_ID)
     - Workbench Collab (CREWAI_AGENT_COLLAB_ID)
@@ -393,3 +434,69 @@ def get_available_agents():
 
 
 
+
+
+@router.get("/batches/{batch_id}/artifacts/{kind}")
+def download_batch_artifact(batch_id: str, kind: str):
+    """
+    Downloads any stage artefact produced for this batch:
+    statement, anomaly_candidates, matched, unmatched_bank, outstanding_gl,
+    recon_exceptions, sla_metrics.
+    """
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    if kind not in ARTIFACT_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown artefact '{kind}'. Expected one of: {sorted(ARTIFACT_FIELDS)}"
+        )
+
+    batch = pipeline_orchestrator.batches[batch_id]
+    field, media_type = ARTIFACT_FIELDS[kind]
+    path_str = getattr(batch, field, None)
+
+    if not _exists(path_str):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Artefact '{kind}' has not been produced for batch '{batch_id}'."
+        )
+
+    path = Path(path_str)
+    return FileResponse(path=str(path), filename=path.name, media_type=media_type)
+
+
+@router.get("/batches/{batch_id}/recon/{dataset}", response_model=PaginatedQueryResponse)
+def query_batch_recon_dataset(
+    batch_id: str,
+    dataset: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=1000),
+    account: Optional[str] = Query(None, description="Filter by account number/substring"),
+    tier: Optional[str] = Query(None, description="Filter matched rows by tier, e.g. TIER_1_EXACT"),
+):
+    """
+    Pages through this batch's Stage 6 reconciliation output:
+    matched, unmatched_bank, outstanding_gl or ambiguous.
+
+    These are the results of the live pipeline run for the batch — the same
+    4-tier waterfall the reconciliation console displays.
+    """
+    if batch_id not in pipeline_orchestrator.batches:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
+    if dataset not in RECON_DATASETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown dataset '{dataset}'. Expected one of: {sorted(RECON_DATASETS)}"
+        )
+
+    target = settings.batch_results_dir / f"{batch_id}{RECON_DATASETS[dataset]}"
+    if not target.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Stage 6 has not produced '{dataset}' for batch '{batch_id}' yet. "
+                "Reconciliation runs once every escalated anomaly is signed off."
+            )
+        )
+
+    return recon_service.query_csv_results(target, page, page_size, account, tier)

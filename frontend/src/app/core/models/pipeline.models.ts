@@ -1,6 +1,9 @@
 /**
  * TypeScript interfaces for the Batch Pipeline, Structural Gate,
  * Agentic Anomaly Detection, Time Estimation, and Publishing.
+ *
+ * Mirrors backend/app/models/pipeline_models.py — every field here is served
+ * by the API; nothing is synthesised client-side.
  */
 
 export interface CheckDetail {
@@ -31,7 +34,7 @@ export interface AnomalyItem {
   booking_date?: string | null;
   error_type: string;
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  category: 'STRUCTURAL' | 'SEMANTIC' | 'TIMING' | 'REFERENTIAL' | 'FORMAT' | 'DUPLICATE' | 'BUSINESS_RULE' | string;
+  category: 'STRUCTURAL' | 'SEMANTIC' | 'TIMING' | 'REFERENTIAL' | string;
   description: string;
   auto_remediable: boolean;
   suggested_fix?: Record<string, any> | null;
@@ -74,6 +77,7 @@ export interface GLMatchSummary {
   tier_3_ref: number;
   tier_4_amount: number;
   unmatched_reconciling_items: number;
+  outstanding_gl_items: number;
   ambiguous_count: number;
   match_rate_pct: number;
 }
@@ -86,6 +90,58 @@ export interface PublishEvent {
   status: string;
   summary: Record<string, any>;
   delivered: boolean;
+}
+
+/** Pipeline stage that owns an automatic agent dispatch. */
+export type AgentStageKey =
+  | 'STAGE_1_EXTRACTION'
+  | 'STAGE_4_ANOMALY'
+  | 'STAGE_6_RECON'
+  | 'STAGE_7_SLA'
+  | 'NON_PIPELINE';
+
+export type AgentExecutionStatus =
+  | 'PENDING'
+  | 'SUBMITTING'
+  | 'SUBMITTED'
+  | 'IN_PROGRESS'
+  | 'SUCCESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'ERROR'
+  | 'CANCELLED'
+  | 'SKIPPED';
+
+export interface AgentExecution {
+  stage: AgentStageKey | string;
+  agent_id: string;
+  agent_name: string;
+  trigger: 'AUTOMATIC' | 'MANUAL';
+  success: boolean;
+  job_id?: number | null;
+  agent_execution_id?: string | null;
+  status: AgentExecutionStatus;
+  message?: string | null;
+  http_status?: string | null;
+  target_file?: string | null;
+  submitted_at?: string | null;
+  completed_at?: string | null;
+  output?: any;
+}
+
+/** One entry of the configured multi-agent roster, served by the API. */
+export interface ConfiguredAgent {
+  id: string;
+  key: string;
+  stage_key: AgentStageKey | string;
+  name: string;
+  role: string;
+  stage: string;
+  description: string;
+  input_artifact: string;
+  auto_dispatch: boolean;
+  human_intervention: boolean;
+  is_default: boolean;
 }
 
 export interface BatchRecord {
@@ -112,7 +168,32 @@ export interface BatchRecord {
   publish_event?: PublishEvent | null;
   batch_file_path?: string | null;
   anomaly_file_path?: string | null;
-  agent_execution?: any;
+  matched_file_path?: string | null;
+  unmatched_file_path?: string | null;
+  outstanding_file_path?: string | null;
+  ambiguous_file_path?: string | null;
+  sla_metrics_file_path?: string | null;
+  agent_executions: Record<string, AgentExecution>;
+}
+
+export interface AgentStatusResponse {
+  batch_id: string;
+  executions: Record<string, AgentExecution>;
+  artifacts: {
+    anomaly_candidates: boolean;
+    recon_exceptions: boolean;
+    sla_metrics: boolean;
+    raw_statement: boolean;
+  };
+}
+
+export interface BatchReconResponse {
+  batch_id: string;
+  summary?: GLMatchSummary | null;
+  matched_sample: any[];
+  unmatched_sample: any[];
+  ambiguous_sample: any[];
+  artifacts: Record<string, string | null>;
 }
 
 export interface IngestionResponse {
@@ -136,3 +217,13 @@ export interface PipelineOverview {
   at_risk_count: number;
   batches: BatchRecord[];
 }
+
+/** Artefact kinds exposed by GET /batches/{id}/artifacts/{kind}. */
+export type ArtifactKind =
+  | 'statement'
+  | 'anomaly_candidates'
+  | 'matched'
+  | 'unmatched_bank'
+  | 'outstanding_gl'
+  | 'recon_exceptions'
+  | 'sla_metrics';

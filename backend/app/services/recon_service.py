@@ -133,7 +133,14 @@ class ReconService:
                 detail=f"Result file does not exist: {file_path}. Run reconciliation first."
             )
 
-        df = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+        try:
+            df = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+        except pd.errors.EmptyDataError:
+            # A stage that produced no rows writes a zero-byte CSV. That is a
+            # valid empty result set, not a failure.
+            return PaginatedQueryResponse(
+                total=0, page=page, page_size=page_size, total_pages=1, items=[]
+            )
 
         if account and "account" in df.columns:
             df = df[df["account"].str.contains(account, case=False, na=False)]

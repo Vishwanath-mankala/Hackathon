@@ -4,6 +4,7 @@ Structural Gate, Agentic Anomalies, Human Escalation, GL Matching, Time Estimati
 """
 import pytest
 from fastapi.testclient import TestClient
+from app.config import settings
 from app.main import app
 
 client = TestClient(app)
@@ -180,28 +181,48 @@ def test_file_downloads_and_agent_integration():
     assert "text/csv" in ano_file_res.headers.get("content-type", "")
     assert b"error_type" in ano_file_res.content
 
-    # 3. Check agent status
+    # 3. Stage 6/7 artefacts are exported for the downstream agents
+    for kind in ("statement", "anomaly_candidates", "sla_metrics"):
+        art_res = client.get(f"/api/pipeline/batches/{batch_id}/artifacts/{kind}")
+        assert art_res.status_code == 200, f"artefact '{kind}' was not produced"
+        assert "text/csv" in art_res.headers.get("content-type", "")
+
+    # 4. Agent status reports the automatic per-stage dispatch log
     status_res = client.get(f"/api/pipeline/batches/{batch_id}/agent/status")
     assert status_res.status_code == 200
-    assert status_res.json()["has_anomaly_file"] is True
+    status_json = status_res.json()
+    assert status_json["artifacts"]["anomaly_candidates"] is True
 
-    # 4. Global agent health
+    executions = status_json["executions"]
+    # Stage 4 fires automatically off the candidates file the rule engine wrote.
+    assert "STAGE_4_ANOMALY" in executions
+    stage_4 = executions["STAGE_4_ANOMALY"]
+    assert stage_4["trigger"] == "AUTOMATIC"
+    assert stage_4["agent_id"] == str(settings.crewai_agent_anomaly_id)
+    # SUBMITTED/SUBMITTING when the platform is reachable, SKIPPED when it is not.
+    assert stage_4["status"] in {"SUBMITTING", "SUBMITTED", "FAILED", "SKIPPED"}
+
+    # 5. Global agent health
     global_agent = client.get("/api/pipeline/agent/status")
     assert global_agent.status_code == 200
 
-    # 5. Trigger external agent classification (submits to Aava AI Agent 7723)
-    classify_res = client.post(f"/api/pipeline/batches/{batch_id}/agent/classify")
+    # 6. Manual re-dispatch of a stage's agent
+    classify_res = client.post(
+        f"/api/pipeline/batches/{batch_id}/agent/classify",
+        params={"stage_key": "STAGE_4_ANOMALY"},
+    )
     assert classify_res.status_code == 200
     res_json = classify_res.json()
-    assert res_json.get("success") is True
-    assert "job_id" in res_json or "agent_execution_id" in res_json
+    assert res_json["trigger"] == "MANUAL"
+    assert res_json["stage"] == "STAGE_4_ANOMALY"
 
-    # 6. Fetch execution output from Aava AI
+    # 7. Poll the platform for outputs on every in-flight execution
+    output_res = client.get(f"/api/pipeline/batches/{batch_id}/agent/output")
+    assert output_res.status_code == 200
+    assert "STAGE_4_ANOMALY" in output_res.json()
+
     exec_id = res_json.get("agent_execution_id")
     if exec_id:
-        output_res = client.get(f"/api/pipeline/batches/{batch_id}/agent/output")
-        assert output_res.status_code == 200
-
         single_exec = client.get(f"/api/pipeline/agent/execution/{exec_id}")
         assert single_exec.status_code == 200
         assert single_exec.json().get("executionId") == exec_id

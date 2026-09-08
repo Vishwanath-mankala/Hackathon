@@ -1,7 +1,7 @@
 """
 Agentic Anomaly Scoring & Auto-Remediation Service.
 Performs row-level rule validation across full batch context, agentic anomaly evaluation
-(with CrewAI / Multi-Agent Platform API integration hooks), safe auto-remediation,
+(feeding the CrewAI / Aava multi-agent platform), safe auto-remediation,
 re-validation loop, and human escalation queue management.
 """
 import re
@@ -9,7 +9,7 @@ import uuid
 import json
 import logging
 import requests
-import urllib.request
+
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
@@ -90,54 +90,81 @@ class CrewAIAgentBridge:
         }
 
     def get_configured_agents(self) -> List[Dict[str, Any]]:
-        """Returns the list of specialized agents configured for this pipeline."""
+        """
+        Returns the multi-agent roster wired into the pipeline. `stage_key`
+        is the orchestrator hook the agent is dispatched from; agents with
+        `auto_dispatch=False` are never fired by the pipeline.
+        """
         return [
             {
                 "id": str(settings.crewai_agent_anomaly_id),
                 "key": "CREWAI_AGENT_ANOMALY_ID",
+                "stage_key": "STAGE_4_ANOMALY",
                 "name": "Enterprise Risk & Anomaly Detection Engine A5",
                 "role": "Senior Enterprise Risk Analytics Specialist",
                 "stage": "Stage 4: Anomaly Classification & Severity Scoring",
-                "description": "Evaluates Structural, Semantic, Timing, and Referential candidate anomalies and assigns risk severity scores.",
-                "is_default": True
-            },
-            {
-                "id": str(settings.crewai_agent_sla_id),
-                "key": "CREWAI_AGENT_SLA_ID",
-                "name": "SLA Analysis & Urgency Classifier",
-                "role": "Senior SLA Compliance Analyst Agent",
-                "stage": "Stage 5: SLA Prediction & Urgency Triage",
-                "description": "Calculates batch urgency, SLA breach probability, and triage priorities for escalation queues.",
-                "is_default": False
+                "description": "Classifies Structural, Semantic, Timing and Referential anomaly candidates and assigns risk severity scores.",
+                "input_artifact": "{batch_id}_candidates.csv",
+                "auto_dispatch": True,
+                "human_intervention": False,
+                "is_default": True,
             },
             {
                 "id": str(settings.crewai_agent_recon_id),
                 "key": "CREWAI_AGENT_RECON_ID",
+                "stage_key": "STAGE_6_RECON",
                 "name": "Verification Reconciliation & Exception Specialist",
                 "role": "Senior Exception Management Specialist",
                 "stage": "Stage 6: GL Reconciliation Exception Review",
-                "description": "Deep verification of multi-candidate ambiguous reconciliations and unmapped GL accounts.",
-                "is_default": False
+                "description": "Reviews ambiguous multi-candidate ties and unmatched reconciling items; proposes tie-breaks for analyst sign-off.",
+                "input_artifact": "{batch_id}_recon_exceptions.csv",
+                "auto_dispatch": True,
+                "human_intervention": True,
+                "is_default": False,
+            },
+            {
+                "id": str(settings.crewai_agent_sla_id),
+                "key": "CREWAI_AGENT_SLA_ID",
+                "stage_key": "STAGE_7_SLA",
+                "name": "SLA Analysis & Urgency Classifier",
+                "role": "Senior SLA Compliance Analyst Agent",
+                "stage": "Stage 7: SLA Prediction & Urgency Triage",
+                "description": "Derives batch urgency tier, SLA breach probability and escalation recommendations from the time estimate.",
+                "input_artifact": "{batch_id}_sla_metrics.csv",
+                "auto_dispatch": True,
+                "human_intervention": False,
+                "is_default": False,
             },
             {
                 "id": str(settings.crewai_agent_extraction_id),
                 "key": "CREWAI_AGENT_EXTRACTION_ID",
+                "stage_key": "STAGE_1_EXTRACTION",
                 "name": "Financial Statement Extraction & Traceability",
                 "role": "Senior Financial Data Extraction Engineer",
-                "stage": "Stage 2: Ingestion & Field Extraction",
-                "description": "Extracts raw financial statements and provides audit evidence traceability.",
-                "is_default": False
+                "stage": "Stage 1: Ingestion & Field Extraction",
+                "description": "Extracts non-CSV statement formats (MT940, BAI2) into the canonical schema with per-field evidence traceability.",
+                "input_artifact": "{batch_id}_{filename} (raw statement)",
+                "auto_dispatch": False,
+                "human_intervention": False,
+                "is_default": False,
             },
             {
                 "id": str(settings.crewai_agent_collab_id),
                 "key": "CREWAI_AGENT_COLLAB_ID",
+                "stage_key": "NON_PIPELINE",
                 "name": "Frontend Architecture Collab Agent",
                 "role": "Collab & Orchestration Agent",
-                "stage": "Cross-Cutting: Workbench Architecture",
-                "description": "General collaboration and UI/UX pipeline architecture coordination.",
-                "is_default": False
-            }
+                "stage": "Cross-cutting: not part of the batch pipeline",
+                "description": "Developer-facing UI/UX architecture collaboration tool. Never fired by the batch pipeline.",
+                "input_artifact": "uiux.json (manually authored)",
+                "auto_dispatch": False,
+                "human_intervention": True,
+                "is_default": False,
+            },
         ]
+
+    def get_agent_for_stage(self, stage_key: str) -> Optional[Dict[str, Any]]:
+        return next((a for a in self.get_configured_agents() if a["stage_key"] == stage_key), None)
 
     def submit_batch_to_agent(self, file_path: Path, agent_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -271,92 +298,6 @@ class CrewAIAgentBridge:
             }
 
 
-
-    def analyze_file_via_agent_api(self, file_path: Path) -> Optional[List[Dict[str, Any]]]:
-        """
-        [PLACEHOLDER HOOK]: Sends raw CSV or TXT batch file to CrewAI Agent API.
-        Enables agents to perform end-to-end multi-agent document analysis.
-        """
-        if not self.is_enabled():
-            logger.info("CrewAI API URL not configured; using local agent pipeline for file analysis.")
-            return None
-
-        try:
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
-
-            headers = {
-                "Content-Type": "application/octet-stream",
-                "X-File-Name": file_path.name,
-                "Authorization": f"Bearer {self.api_key or ''}"
-            }
-            req = urllib.request.Request(
-                f"{self.api_url}/analyze-file",
-                data=file_bytes,
-                headers=headers,
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    return data.get("anomalies", [])
-        except Exception as e:
-            logger.warning(f"CrewAI file analysis API call failed ({e}); falling back to local evaluation.")
-            return None
-
-    def enrich_anomalies_via_api(
-        self,
-        anomalies: List[AnomalyItem],
-        df: pd.DataFrame
-    ) -> Optional[List[AnomalyItem]]:
-        """
-        [PLACEHOLDER HOOK]: Sends anomaly candidates and context rows to CrewAI
-        for multi-agent classification, confidence scoring, and suggested fixes.
-        """
-        if not self.is_enabled():
-            return None
-
-        try:
-            payload = {
-                "batch_context": {
-                    "total_rows": len(df),
-                    "columns": list(df.columns)
-                },
-                "candidates": [a.model_dump() for a in anomalies[:50]]
-            }
-            json_bytes = json.dumps(payload).encode("utf-8")
-
-            req = urllib.request.Request(
-                f"{self.api_url}/score-anomalies" if not self.api_url.endswith("/score-anomalies") else self.api_url,
-                data=json_bytes,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key or ''}"
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                if resp.status == 200:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    agent_items = result.get("anomalies", [])
-                    if agent_items:
-                        logger.info(f"Successfully received {len(agent_items)} anomaly scores from CrewAI agent.")
-                        enriched_list = []
-                        agent_map = {item.get("id"): item for item in agent_items if "id" in item}
-                        for a in anomalies:
-                            if a.id in agent_map:
-                                ai = agent_map[a.id]
-                                a.confidence_score = ai.get("confidence_score", a.confidence_score)
-                                a.description = ai.get("description", a.description)
-                                if "suggested_fix" in ai and ai["suggested_fix"]:
-                                    a.suggested_fix = ai["suggested_fix"]
-                                if "remediation_notes" in ai:
-                                    a.remediation_notes = ai["remediation_notes"]
-                            enriched_list.append(a)
-                        return enriched_list
-        except Exception as e:
-            logger.info(f"CrewAI agent API call fell back to local agent evaluator: {e}")
-            return None
 
 
 class AgenticAnomalyService:
@@ -655,14 +596,6 @@ class AgenticAnomalyService:
         for r_idx, col, val in remediations_to_apply:
             if col in clean_df.columns:
                 clean_df.at[r_idx, col] = val
-
-        # =====================================================================
-        # AGENT INTEGRATION HOOK (CrewAI / Multi-Agent Platform API)
-        # =====================================================================
-        if (self.agent_bridge.is_enabled() or self.crewai_api_url) and anomalies:
-            enriched = self.agent_bridge.enrich_anomalies_via_api(anomalies, clean_df)
-            if enriched:
-                anomalies = enriched
 
         # =====================================================================
         # STAGE 3 FILE GENERATION: Export Anomaly Candidates to CSV & JSON

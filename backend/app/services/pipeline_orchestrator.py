@@ -1,18 +1,22 @@
 """
 Pipeline Orchestrator — Sequences the 8 stages of the batch validation and reconciliation pipeline:
-1. Ingestion (SFTP / Drop / Upload)
-2. Structural Gate (Hard checkpoint)
+1. Ingestion (SFTP drop polling / upload)
+2. Structural Gate (hard file-level checkpoint)
 3. Row-level Rule Engine
-4. Agentic Anomaly Scoring
-5. Auto-Remediation (safe fixes) & Human Escalation Review
-6. Tiered GL Matching (valid rows only)
-7. Processing Time & SLA Estimation
+4. Agentic Anomaly Scoring  -> auto-dispatches Agent CREWAI_AGENT_ANOMALY_ID
+5. Auto-Remediation (safe fixes, re-validated through Stage 3) & Human Escalation
+6. Tiered GL Matching       -> auto-dispatches Agent CREWAI_AGENT_RECON_ID
+7. Processing Time & SLA Estimation -> auto-dispatches Agent CREWAI_AGENT_SLA_ID
 8. Downstream Publishing
+
+Every stage runs automatically as soon as its predecessor produces its artefacts.
+The only stage that blocks on a human is Stage 5b (analyst escalation review).
 """
-import uuid
+import sys
 import time
 import shutil
 import logging
+import threading
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -23,10 +27,9 @@ from app.models.pipeline_models import (
     StructuralGateDetails,
     CheckDetail,
     AnomalyItem,
-    TimeEstimate,
+    AgentExecution,
     GLMatchSummary,
-    PublishEvent,
-    PipelineOverview
+    PipelineOverview,
 )
 from app.services.ingestion_service import ingestion_service
 from app.services.agentic_anomaly_service import agentic_anomaly_service
@@ -36,6 +39,15 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+RULE_ENGINE_DIR = str(settings.project_root / "Rule Engine")
+if RULE_ENGINE_DIR not in sys.path:
+    sys.path.insert(0, RULE_ENGINE_DIR)
+
+import rule_engine  # noqa: E402  (path-injected sibling module)
+
+# Aava execution states that mean the job is finished and no longer worth polling.
+TERMINAL_AGENT_STATES = {"SUCCESS", "COMPLETED", "FAILED", "ERROR", "CANCELLED"}
+
 
 class PipelineOrchestrator:
     def __init__(self):
@@ -44,18 +56,52 @@ class PipelineOrchestrator:
         self.batch_anomalies: Dict[str, List[AnomalyItem]] = {}
         self.batch_match_results: Dict[str, Any] = {}
         self.gl_cache: Optional[pd.DataFrame] = None
+        self._recon_engine = None
+        self._reconciled_batches: set = set()
+        self._lock = threading.Lock()
         self._load_gl_cache()
-        self._seed_sample_batches()
+        self._poll_sftp_dropbox()
 
+    # =========================================================================
+    # Bootstrap
+    # =========================================================================
     def _load_gl_cache(self):
-        """Loads the GL cashbook cache for reconciliation."""
-        if settings.cache_path.exists():
-            try:
-                self.gl_cache = pd.read_csv(settings.cache_path, dtype=str)
-                logger.info(f"Loaded GL Cashbook Cache: {len(self.gl_cache)} rows.")
-            except Exception as e:
-                logger.warning(f"Failed to load GL cache: {e}")
+        """Loads the GL cashbook cache used by Stage 6 reconciliation."""
+        if not settings.cache_path.exists():
+            logger.warning(f"GL cashbook cache not found at {settings.cache_path}; Stage 6 will report zero matches.")
+            return
+        try:
+            self.gl_cache = pd.read_csv(settings.cache_path, dtype=str, keep_default_na=False)
+            self._recon_engine = rule_engine.RuleEngine(self.gl_cache, rule_engine.MatchConfig())
+            logger.info(f"Loaded GL Cashbook Cache: {len(self.gl_cache)} rows.")
+        except Exception as e:
+            logger.warning(f"Failed to load GL cache: {e}")
 
+    def _poll_sftp_dropbox(self):
+        """
+        Stage 1 automated directory polling. Ingests every statement waiting in
+        incoming_sftp/. When that dropbox is empty, falls back to the generated
+        bank-statement feed so the console has live batches to work on.
+        """
+        if not settings.sftp_auto_ingest:
+            return
+
+        pending = sorted(settings.sftp_dir.glob("*.csv"))
+        source = "SFTP"
+
+        if not pending:
+            pending = sorted(settings.batches_dir.glob("ingest_batch_*.csv"))[:2]
+            source = "SFTP_FEED"
+
+        for f in pending:
+            try:
+                self.ingest_batch(file_path=f, filename=f.name, source=source, auto_run_pipeline=True)
+            except Exception as e:
+                logger.warning(f"SFTP auto-ingest failed for {f.name}: {e}")
+
+    # =========================================================================
+    # Stage 1 — Ingestion
+    # =========================================================================
     def ingest_batch(
         self,
         file_path: Optional[Path] = None,
@@ -66,9 +112,6 @@ class PipelineOrchestrator:
         declared_control_total: Optional[float] = None,
         auto_run_pipeline: bool = True
     ) -> BatchRecord:
-        start_time = time.time()
-
-        # Stage [1]: Ingestion
         batch_id, stored_path, meta, df = ingestion_service.ingest_file(
             file_path=file_path,
             file_bytes=file_bytes,
@@ -78,9 +121,8 @@ class PipelineOrchestrator:
             declared_control_total=declared_control_total
         )
 
-        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        now_str = self._now()
 
-        # Initial Processing Time Estimate
         time_est = time_estimator_service.estimate_processing_time(
             batch_id=batch_id,
             file_size_bytes=meta["file_size_bytes"],
@@ -112,41 +154,52 @@ class PipelineOrchestrator:
 
         return record
 
+    # =========================================================================
+    # Stages 2 -> 8
+    # =========================================================================
     def run_pipeline(self, batch_id: str, stored_path: Path, meta: Dict[str, Any]):
         start_clock = time.time()
         batch = self.batches[batch_id]
         df = self.batch_dfs[batch_id]
 
-        # Stage [2]: File-level Structural Gate
+        # ---- Stage 2: File-level Structural Gate ----------------------------
         gate_details = self._execute_structural_gate(batch_id, stored_path, df, meta)
         batch.gate_details = gate_details
         batch.gate_passed = gate_details.passed
 
         if not gate_details.passed:
-            # Hard file-level failure: Quarantine entire file, abort downstream
             batch.stage = "GATE_QUARANTINED"
-            batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            batch.updated_at = self._now()
             logger.warning(f"Batch {batch_id} failed structural gate: {gate_details.reasons}")
             return batch
 
         batch.stage = "GATE_PASSED"
 
-        # Stage [3] & [4] & [5a]: Row-level Rules, Anomaly Scoring, Auto-remediation
+        # ---- Stages 3, 4, 5a: rules, anomaly scoring, auto-remediation ------
         clean_df, anomalies, candidate_file = agentic_anomaly_service.evaluate_batch(df, batch_id, stored_path)
+
+        # Stage 5a re-validation loop: rerun Stage 3 over the remediated frame so
+        # an auto-fix that itself violates a rule is caught rather than trusted.
+        if any(a.status == "AUTO_REMEDIATED" for a in anomalies):
+            clean_df, anomalies, candidate_file = self._revalidate_after_remediation(
+                clean_df, anomalies, batch_id, stored_path
+            )
+
         self.batch_dfs[batch_id] = clean_df
         self.batch_anomalies[batch_id] = anomalies
         if candidate_file:
             batch.anomaly_file_path = str(candidate_file)
 
-        auto_remediated = [a for a in anomalies if a.status == "AUTO_REMEDIATED"]
         escalated = [a for a in anomalies if a.status == "ESCALATED"]
 
         batch.anomaly_count = len(anomalies)
-        batch.auto_remediated_count = len(auto_remediated)
+        batch.auto_remediated_count = sum(1 for a in anomalies if a.status == "AUTO_REMEDIATED")
         batch.escalated_count = len(escalated)
         batch.valid_records_count = len(clean_df) - len(escalated)
 
-        # Update Processing Time & SLA estimate with real anomaly triage overhead
+        # Stage 4 agent dispatch — fires as soon as the candidate file exists.
+        self._dispatch_agent_async(batch, "STAGE_4_ANOMALY", batch.anomaly_file_path)
+
         batch.time_estimate = time_estimator_service.estimate_processing_time(
             batch_id=batch_id,
             file_size_bytes=batch.file_size_bytes,
@@ -155,27 +208,104 @@ class PipelineOrchestrator:
             escalated_count=batch.escalated_count
         )
 
-        batch.stage = "RULE_VALIDATED" if len(escalated) == 0 else "ESCALATED_FOR_REVIEW"
+        if escalated:
+            # ARCHITECTURE.md Stage 5b: the batch holds at the analyst queue.
+            # Stage 6 only runs once every escalation is signed off, so an
+            # approved correction is matched against the GL rather than skipped.
+            batch.stage = "ESCALATED_FOR_REVIEW"
+            self._finalize_sla(batch, start_clock)
+            batch.updated_at = self._now()
+            return batch
 
-        # Stage [6]: GL Matching (runs on all validated rows)
-        # Note: Escalated rows are held back until human resolves them
-        valid_df = clean_df[~clean_df.index.isin([a.row_index for a in escalated])].copy()
-        gl_summary = self._execute_gl_matching(batch_id, valid_df)
+        batch.stage = "RULE_VALIDATED"
+        self._reconcile_and_finalize(batch, clean_df, start_clock)
+        return batch
+
+    def _revalidate_after_remediation(
+        self,
+        clean_df: pd.DataFrame,
+        first_pass: List[AnomalyItem],
+        batch_id: str,
+        stored_path: Path,
+    ):
+        """
+        ARCHITECTURE.md Stage 5a: "Remediated rows re-enter Stage 3 for
+        re-validation before proceeding." Re-runs the rule engine on the
+        corrected frame and keeps the first-pass remediation entries as the
+        audit trail alongside whatever the second pass still objects to.
+        """
+        revalidated_df, second_pass, candidate_file = agentic_anomaly_service.evaluate_batch(
+            clean_df, batch_id, stored_path
+        )
+
+        remediation_log = [a for a in first_pass if a.status == "AUTO_REMEDIATED"]
+        for item in remediation_log:
+            item.remediation_notes = (
+                f"{item.remediation_notes or ''} Re-validated through Stage 3 rule engine."
+            ).strip()
+
+        merged = remediation_log + [a for a in second_pass if a.status != "AUTO_REMEDIATED"]
+        return revalidated_df, merged, candidate_file
+
+    def _reconcile_and_finalize(
+        self,
+        batch: BatchRecord,
+        valid_df: pd.DataFrame,
+        start_clock: float,
+    ):
+        """Stages 6 -> 8, plus the Stage 6 agent dispatch."""
+        if batch.batch_id in self._reconciled_batches:
+            # The GL cache is consumed as it is matched, so replaying a batch
+            # would settle the same ledger rows twice.
+            logger.info(f"Batch {batch.batch_id} already reconciled; skipping Stage 6 replay.")
+            return
+
+        gl_summary = self._execute_gl_matching(batch, valid_df)
+        self._reconciled_batches.add(batch.batch_id)
         batch.gl_summary = gl_summary
         batch.matched_count = gl_summary.matched_count
         batch.unmatched_count = gl_summary.unmatched_reconciling_items
 
-        if len(escalated) == 0:
-            batch.stage = "RECONCILED"
-            # Stage [8]: Publish results
-            publish_service.publish_batch(batch)
+        # ---- Stage 7: SLA estimate + metrics artefact -----------------------
+        self._finalize_sla(batch, start_clock, gl_summary)
 
-        elapsed = time.time() - start_clock
-        time_estimator_service.record_actual_run(batch.time_estimate, elapsed)
-        batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        # ---- Stage 6 agent dispatch -----------------------------------------
+        self._dispatch_agent_async(batch, "STAGE_6_RECON", batch.ambiguous_file_path or batch.unmatched_file_path)
 
-        return batch
+        # ---- Stage 8: Publish ------------------------------------------------
+        batch.stage = "RECONCILED"
+        publish_service.publish_batch(batch)
+        batch.updated_at = self._now()
 
+    def _finalize_sla(
+        self,
+        batch: BatchRecord,
+        start_clock: float,
+        gl_summary: Optional[GLMatchSummary] = None,
+    ):
+        """Stage 7: records the actual run, exports the SLA feature vector, dispatches the SLA agent."""
+        if not batch.time_estimate:
+            return
+
+        time_estimator_service.record_actual_run(batch.time_estimate, time.time() - start_clock)
+        try:
+            sla_path = time_estimator_service.export_sla_metrics(
+                estimate=batch.time_estimate,
+                escalated_count=batch.escalated_count,
+                matched_count=gl_summary.matched_count if gl_summary else 0,
+                unmatched_count=gl_summary.unmatched_reconciling_items if gl_summary else 0,
+                ambiguous_count=gl_summary.ambiguous_count if gl_summary else 0,
+            )
+            batch.sla_metrics_file_path = str(sla_path)
+        except Exception as e:
+            logger.error(f"Failed to export SLA metrics for {batch.batch_id}: {e}")
+            return
+
+        self._dispatch_agent_async(batch, "STAGE_7_SLA", batch.sla_metrics_file_path)
+
+    # =========================================================================
+    # Stage 2 implementation
+    # =========================================================================
     def _execute_structural_gate(
         self,
         batch_id: str,
@@ -238,9 +368,8 @@ class PipelineOrchestrator:
 
         quarantine_path = None
         if not passed:
-            quarantine_dir = settings.project_root / "data" / "quarantined_batches"
-            quarantine_dir.mkdir(parents=True, exist_ok=True)
-            quarantine_dest = quarantine_dir / file_path.name
+            settings.quarantine_dir.mkdir(parents=True, exist_ok=True)
+            quarantine_dest = settings.quarantine_dir / file_path.name
             shutil.copyfile(file_path, quarantine_dest)
             quarantine_path = str(quarantine_dest)
 
@@ -257,11 +386,20 @@ class PipelineOrchestrator:
             quarantine_path=quarantine_path
         )
 
-    def _execute_gl_matching(self, batch_id: str, df: pd.DataFrame) -> GLMatchSummary:
+    # =========================================================================
+    # Stage 6 implementation — full 4-tier waterfall
+    # =========================================================================
+    def _execute_gl_matching(self, batch: BatchRecord, df: pd.DataFrame) -> GLMatchSummary:
         """
-        Executes tiered GL matching for validated rows against the cached GL slice.
+        Runs the shared 4-tier waterfall rule engine (Tier 1 exact -> Tier 2 date
+        tolerance -> Tier 3 reference overlap -> Tier 4 amount slack) for this
+        batch against the GL cashbook cache, then exports the Stage 6 artefacts
+        that the reconciliation exception agent consumes.
         """
-        if self.gl_cache is None or self.gl_cache.empty or df.empty:
+        batch_id = batch.batch_id
+
+        if self._recon_engine is None or df.empty:
+            self.batch_match_results[batch_id] = {"matched": [], "unmatched_reconciling": [], "ambiguous": []}
             return GLMatchSummary(
                 total_eligible_rows=len(df),
                 matched_count=0,
@@ -270,93 +408,118 @@ class PipelineOrchestrator:
                 tier_3_ref=0,
                 tier_4_amount=0,
                 unmatched_reconciling_items=len(df),
+                outstanding_gl_items=len(self._recon_engine.cache) if self._recon_engine else 0,
                 ambiguous_count=0,
                 match_rate_pct=0.0
             )
 
-        # Build fast lookup indexes from GL cache
-        gl = self.gl_cache.copy()
-        gl["amount_num"] = pd.to_numeric(gl["amount"], errors="coerce").abs().round(2)
-        gl["date_str"] = gl.get("value_date", gl.get("txn_date", "")).astype(str).str.strip()
-        gl["account_clean"] = gl["account"].astype(str).str.strip()
+        # One engine across all batches: GL rows already settled by an earlier
+        # batch are removed from the cache, exactly as the standalone runner does.
+        engine = self._recon_engine
+        before_matches = len(engine.matches)
+        before_unmatched = len(engine.unmatched_ingest)
+        before_ambiguous = len(engine.ambiguous)
 
-        matched_rows = []
-        unmatched_rows = []
+        engine.process_batch(df, batch.filename)
 
-        tier_1 = 0
-        tier_2 = 0
-        tier_3 = 0
-        tier_4 = 0
+        batch_matches = engine.matches[before_matches:]
+        batch_unmatched = engine.unmatched_ingest[before_unmatched:]
+        batch_ambiguous = engine.ambiguous[before_ambiguous:]
 
-        # Create quick index: (account, amount_num, date_str)
-        exact_index = {}
-        for idx, r in gl.iterrows():
-            key = (r["account_clean"], r["amount_num"], r["date_str"])
-            if key not in exact_index:
-                exact_index[key] = []
-            exact_index[key].append(idx)
+        drop_cols = ("amount_abs", "date_parsed")
+        matches_df = pd.DataFrame(batch_matches)
+        unmatched_df = pd.DataFrame(
+            [{k: v for k, v in r.items() if k not in drop_cols} for r in batch_unmatched]
+        )
+        ambiguous_df = pd.DataFrame(batch_ambiguous)
+        outstanding_df = engine.remaining_cache_df()
 
-        # Match each ingested row
-        for _, row in df.iterrows():
-            acc = str(row.get("account", "")).strip()
-            raw_amt = row.get("amount", 0)
-            try:
-                amt = round(abs(float(str(raw_amt).replace(",", "").replace("$", ""))), 2)
-            except Exception:
-                amt = 0.0
+        tier_counts: Dict[str, int] = {}
+        if not matches_df.empty and "matchRule" in matches_df.columns:
+            tier_counts = {str(k): int(v) for k, v in matches_df["matchRule"].value_counts().items()}
 
-            d_str = str(row.get("value_date", row.get("booking_date", ""))).strip()
-            exact_key = (acc, amt, d_str)
-
-            if exact_key in exact_index and exact_index[exact_key]:
-                gl_idx = exact_index[exact_key].pop(0)
-                matched_rows.append({
-                    "ingest_row": row.to_dict(),
-                    "gl_row": gl.loc[gl_idx].to_dict(),
-                    "tier": "TIER_1_EXACT"
-                })
-                tier_1 += 1
-            else:
-                # Check Tier 4 Amount tolerance ($1.00 slack) or Tier 2 date tolerance
-                matched = False
-                candidates = gl[gl["account_clean"] == acc]
-                if not candidates.empty:
-                    # Amount slack check
-                    amt_diff = (candidates["amount_num"] - amt).abs()
-                    close_amts = candidates[amt_diff <= 1.00]
-                    if not close_amts.empty:
-                        gl_idx = close_amts.index[0]
-                        matched_rows.append({
-                            "ingest_row": row.to_dict(),
-                            "gl_row": gl.loc[gl_idx].to_dict(),
-                            "tier": "TIER_4_AMOUNT_TOLERANCE"
-                        })
-                        tier_4 += 1
-                        matched = True
-
-                if not matched:
-                    unmatched_rows.append(row.to_dict())
-
-        total_matched = len(matched_rows)
-        match_rate = round((total_matched / max(1, len(df))) * 100, 1)
+        matched_records = matches_df.to_dict(orient="records") if not matches_df.empty else []
+        unmatched_records = unmatched_df.to_dict(orient="records") if not unmatched_df.empty else []
+        ambiguous_records = ambiguous_df.to_dict(orient="records") if not ambiguous_df.empty else []
 
         self.batch_match_results[batch_id] = {
-            "matched": matched_rows,
-            "unmatched_reconciling": unmatched_rows
+            "matched": matched_records,
+            "unmatched_reconciling": unmatched_records,
+            "ambiguous": ambiguous_records,
         }
 
+        self._export_recon_artifacts(batch, matches_df, unmatched_df, outstanding_df, ambiguous_df)
+
+        total_matched = len(matched_records)
         return GLMatchSummary(
             total_eligible_rows=len(df),
             matched_count=total_matched,
-            tier_1_exact=tier_1,
-            tier_2_date=tier_2,
-            tier_3_ref=tier_3,
-            tier_4_amount=tier_4,
-            unmatched_reconciling_items=len(unmatched_rows),
-            ambiguous_count=0,
-            match_rate_pct=match_rate
+            tier_1_exact=tier_counts.get("TIER_1_EXACT", 0),
+            tier_2_date=tier_counts.get("TIER_2_DATE_TOLERANCE", 0),
+            tier_3_ref=tier_counts.get("TIER_3_REFERENCE_MATCH", 0),
+            tier_4_amount=tier_counts.get("TIER_4_AMOUNT_TOLERANCE", 0),
+            unmatched_reconciling_items=len(unmatched_records),
+            outstanding_gl_items=len(outstanding_df),
+            ambiguous_count=len(ambiguous_records),
+            match_rate_pct=round((total_matched / max(1, len(df))) * 100, 1)
         )
 
+    def _export_recon_artifacts(
+        self,
+        batch: BatchRecord,
+        matches_df: pd.DataFrame,
+        unmatched_df: pd.DataFrame,
+        outstanding_df: pd.DataFrame,
+        ambiguous_df: pd.DataFrame,
+    ):
+        """
+        Writes the per-batch Stage 6 CSVs. `{batch_id}_recon_exceptions.csv` is
+        the input artefact for the reconciliation exception agent — it carries
+        every line the waterfall could not settle outright.
+        """
+        out_dir = settings.batch_results_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        bid = batch.batch_id
+
+        try:
+            matched_path = out_dir / f"{bid}_matched.csv"
+            matches_df.to_csv(matched_path, index=False)
+            batch.matched_file_path = str(matched_path)
+
+            unmatched_path = out_dir / f"{bid}_unmatched_bank.csv"
+            unmatched_df.to_csv(unmatched_path, index=False)
+            batch.unmatched_file_path = str(unmatched_path)
+
+            outstanding_path = out_dir / f"{bid}_outstanding_gl.csv"
+            outstanding_df.to_csv(outstanding_path, index=False)
+            batch.outstanding_file_path = str(outstanding_path)
+
+            ambiguous_path = out_dir / f"{bid}_ambiguous.csv"
+            ambiguous_df.to_csv(ambiguous_path, index=False)
+
+            # Combined exception feed for the Stage 6 agent.
+            frames = []
+            if not ambiguous_df.empty:
+                amb = ambiguous_df.copy()
+                amb["exception_type"] = "AMBIGUOUS_TIE"
+                frames.append(amb)
+            if not unmatched_df.empty:
+                unm = unmatched_df.copy()
+                unm["exception_type"] = "RECONCILING_ITEM_BANK_ONLY"
+                frames.append(unm)
+
+            exceptions_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+                columns=["exception_type"]
+            )
+            exceptions_path = out_dir / f"{bid}_recon_exceptions.csv"
+            exceptions_df.to_csv(exceptions_path, index=False)
+            batch.ambiguous_file_path = str(exceptions_path)
+        except Exception as e:
+            logger.error(f"Failed to export Stage 6 artefacts for {bid}: {e}")
+
+    # =========================================================================
+    # Stage 5b — Human-in-the-loop resolution
+    # =========================================================================
     def resolve_escalation(
         self,
         batch_id: str,
@@ -366,9 +529,9 @@ class PipelineOrchestrator:
         analyst_notes: Optional[str] = None
     ) -> BatchRecord:
         """
-        Stage [5b] Human-in-the-Loop Resolution:
-        Analyst accepts suggested fix, provides manual override, or quarantines row.
-        Remediated rows re-enter rule engine for re-validation!
+        Analyst accepts the suggested fix, supplies a manual override, or
+        quarantines the row. Once the last escalation clears, Stages 6-8 run
+        automatically without any further operator action.
         """
         if batch_id not in self.batches:
             raise KeyError(f"Batch {batch_id} not found.")
@@ -383,7 +546,6 @@ class PipelineOrchestrator:
         r_idx = target.row_index
 
         if action == "APPROVE":
-            # Apply the suggested fix
             if target.suggested_fix:
                 for k, v in target.suggested_fix.items():
                     if k in df.columns:
@@ -401,138 +563,184 @@ class PipelineOrchestrator:
             target.remediation_notes = f"Row quarantined by analyst. Notes: {analyst_notes or 'None'}"
             batch.quarantined_rows_count += 1
 
-        # Check remaining escalated items
         remaining_escalated = [a for a in anomalies if a.status == "ESCALATED"]
         batch.escalated_count = len(remaining_escalated)
 
-        # If all escalations resolved, run reconciliation and publish
-        if len(remaining_escalated) == 0:
+        if not remaining_escalated:
             valid_df = df[~df.index.isin([a.row_index for a in anomalies if a.status == "QUARANTINED"])].copy()
             batch.valid_records_count = len(valid_df)
-            gl_summary = self._execute_gl_matching(batch_id, valid_df)
-            batch.gl_summary = gl_summary
-            batch.matched_count = gl_summary.matched_count
-            batch.unmatched_count = gl_summary.unmatched_reconciling_items
-            batch.stage = "RECONCILED"
-            publish_service.publish_batch(batch)
+            self._reconcile_and_finalize(batch, valid_df, time.time())
 
-        batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        batch.updated_at = self._now()
         return batch
+
+    # =========================================================================
+    # Automatic multi-agent dispatch
+    # =========================================================================
+    def _dispatch_agent_async(self, batch: BatchRecord, stage_key: str, artifact_path: Optional[str]):
+        """
+        Fires the agent registered for `stage_key` against `artifact_path` on a
+        background thread so the synchronous pipeline never blocks on the
+        external platform. Records the outcome on batch.agent_executions.
+        """
+        agent = agentic_anomaly_service.agent_bridge.get_agent_for_stage(stage_key)
+        if not agent:
+            return
+
+        execution = AgentExecution(
+            stage=stage_key,
+            agent_id=agent["id"],
+            agent_name=agent["name"],
+            trigger="AUTOMATIC",
+        )
+        batch.agent_executions[stage_key] = execution
+
+        if not settings.auto_agent_dispatch or not agent.get("auto_dispatch"):
+            execution.status = "SKIPPED"
+            execution.message = "Automatic dispatch disabled for this agent."
+            return
+
+        if not artifact_path or not Path(artifact_path).exists():
+            execution.status = "SKIPPED"
+            execution.message = f"No input artefact produced for {stage_key}; nothing to classify."
+            return
+
+        if not agentic_anomaly_service.agent_bridge.is_enabled():
+            execution.status = "SKIPPED"
+            execution.message = "External agent platform not configured (set CREWAI_API_URL / CREWAI_API_KEY)."
+            return
+
+        execution.status = "SUBMITTING"
+        execution.target_file = Path(artifact_path).name
+
+        threading.Thread(
+            target=self._submit_agent_job,
+            args=(batch.batch_id, stage_key, Path(artifact_path), agent["id"]),
+            daemon=True,
+            name=f"agent-{stage_key}-{batch.batch_id}",
+        ).start()
+
+    def _submit_agent_job(self, batch_id: str, stage_key: str, artifact: Path, agent_id: str):
+        result = agentic_anomaly_service.agent_bridge.submit_batch_to_agent(artifact, agent_id=agent_id)
+
+        with self._lock:
+            batch = self.batches.get(batch_id)
+            if not batch:
+                return
+            execution = batch.agent_executions.get(stage_key)
+            if not execution:
+                return
+
+            execution.success = bool(result.get("success"))
+            execution.job_id = result.get("job_id")
+            execution.agent_execution_id = result.get("agent_execution_id")
+            execution.message = result.get("message")
+            execution.http_status = str(result.get("http_status"))
+            execution.submitted_at = result.get("submitted_at")
+            execution.status = "SUBMITTED" if execution.success else "FAILED"
+            batch.agent_execution = execution.model_dump()
+            batch.updated_at = self._now()
+
+    def refresh_agent_outputs(self, batch_id: str) -> Dict[str, AgentExecution]:
+        """
+        Pulls the latest execution output for every non-terminal agent job on
+        this batch. Called by the console's polling endpoint — the operator
+        never has to press anything to make an agent run.
+        """
+        if batch_id not in self.batches:
+            raise KeyError(f"Batch '{batch_id}' not found.")
+
+        batch = self.batches[batch_id]
+        bridge = agentic_anomaly_service.agent_bridge
+
+        for execution in batch.agent_executions.values():
+            if not execution.agent_execution_id:
+                continue
+            if execution.status in TERMINAL_AGENT_STATES:
+                continue
+
+            data = bridge.get_agent_execution_output(execution.agent_execution_id)
+            if not data.get("success"):
+                execution.message = data.get("message") or execution.message
+                continue
+
+            execution.output = data.get("output")
+            execution.status = (data.get("status") or "IN_PROGRESS").upper()
+            if execution.status in TERMINAL_AGENT_STATES:
+                execution.completed_at = data.get("modifiedAt") or self._now()
+
+        batch.updated_at = self._now()
+        return batch.agent_executions
 
     def trigger_agent_classification(
         self,
         batch_id: str,
-        use_anomalies_file: bool = True,
+        stage_key: str = "STAGE_4_ANOMALY",
         agent_id: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> AgentExecution:
         """
-        Submits either the candidate anomaly CSV (if available) or the raw batch statement CSV
-        to the external Aava AI Agent (default ID 7723 or specified agent_id) via multipart/form-data.
-        Records the agent execution job info on the batch.
-        """
-        if batch_id not in self.batches:
-            raise KeyError(f"Batch '{batch_id}' not found.")
-
-        batch = self.batches[batch_id]
-
-        target_path: Optional[Path] = None
-        if use_anomalies_file and batch.anomaly_file_path:
-            p = Path(batch.anomaly_file_path)
-            if p.exists():
-                target_path = p
-
-        if not target_path and batch.batch_file_path:
-            p = Path(batch.batch_file_path)
-            if p.exists():
-                target_path = p
-
-        if not target_path:
-            # Fallback to output batches directory
-            candidate_p = settings.batches_dir / f"{batch.filename}"
-            if candidate_p.exists():
-                target_path = candidate_p
-
-        if not target_path or not target_path.exists():
-            raise FileNotFoundError(f"No statement or anomaly candidate file found on disk for batch '{batch_id}'.")
-
-        result = agentic_anomaly_service.agent_bridge.submit_batch_to_agent(target_path, agent_id=agent_id)
-        batch.agent_execution = result
-        batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        return result
-
-    def get_batch_agent_output(self, batch_id: str) -> Dict[str, Any]:
-        """
-        Fetches the execution output from Aava AI using the batch's agent_execution_id.
+        Manual re-dispatch of a stage's agent. The pipeline already fires these
+        automatically; this exists for re-running a failed submission.
         """
         if batch_id not in self.batches:
             raise KeyError(f"Batch '{batch_id}' not found.")
 
         batch = self.batches[batch_id]
-        if not batch.agent_execution or not batch.agent_execution.get("agent_execution_id"):
-            return {
-                "success": False,
-                "message": f"No agent execution submitted yet for batch '{batch_id}'.",
-                "batch_id": batch_id
-            }
+        artifact = self._artifact_for_stage(batch, stage_key)
+        if not artifact:
+            raise FileNotFoundError(
+                f"No input artefact available on disk for stage '{stage_key}' of batch '{batch_id}'."
+            )
 
-        exec_id = batch.agent_execution["agent_execution_id"]
-        output_data = agentic_anomaly_service.agent_bridge.get_agent_execution_output(exec_id)
+        agent = agentic_anomaly_service.agent_bridge.get_agent_for_stage(stage_key)
+        if not agent:
+            raise KeyError(f"No agent configured for stage '{stage_key}'.")
 
-        # Store latest output on the batch record
-        if output_data.get("success"):
-            batch.agent_execution["output_details"] = output_data
-            batch.updated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        resolved_agent_id = str(agent_id or agent["id"])
+        execution = AgentExecution(
+            stage=stage_key,
+            agent_id=resolved_agent_id,
+            agent_name=agent["name"],
+            trigger="MANUAL",
+            status="SUBMITTING",
+            target_file=artifact.name,
+        )
+        batch.agent_executions[stage_key] = execution
 
-        return output_data
+        self._submit_agent_job(batch_id, stage_key, artifact, resolved_agent_id)
+        return batch.agent_executions[stage_key]
 
+    def _artifact_for_stage(self, batch: BatchRecord, stage_key: str) -> Optional[Path]:
+        mapping = {
+            "STAGE_1_EXTRACTION": batch.batch_file_path,
+            "STAGE_4_ANOMALY": batch.anomaly_file_path or batch.batch_file_path,
+            "STAGE_6_RECON": batch.ambiguous_file_path or batch.unmatched_file_path,
+            "STAGE_7_SLA": batch.sla_metrics_file_path,
+        }
+        candidate = mapping.get(stage_key)
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+        return None
+
+    # =========================================================================
+    # Read models
+    # =========================================================================
     def get_overview(self) -> PipelineOverview:
         b_list = list(self.batches.values())
-        total = len(b_list)
-        active = sum(1 for b in b_list if b.stage in ["INGESTED", "GATE_PASSED", "ESCALATED_FOR_REVIEW"])
-        completed = sum(1 for b in b_list if b.stage in ["RECONCILED", "PUBLISHED"])
-        quarantined = sum(1 for b in b_list if b.stage == "GATE_QUARANTINED")
-        records = sum(b.total_records for b in b_list)
-        breached = sum(1 for b in b_list if b.time_estimate and b.time_estimate.sla_status == "BREACHED")
-        at_risk = sum(1 for b in b_list if b.time_estimate and b.time_estimate.sla_status == "AT_RISK")
-
         return PipelineOverview(
-            total_batches=total,
-            active_batches=active,
-            completed_batches=completed,
-            quarantined_batches=quarantined,
-            total_records_processed=records,
-            sla_breaches=breached,
-            at_risk_count=at_risk,
+            total_batches=len(b_list),
+            active_batches=sum(1 for b in b_list if b.stage in ["INGESTED", "GATE_PASSED", "RULE_VALIDATED", "ESCALATED_FOR_REVIEW"]),
+            completed_batches=sum(1 for b in b_list if b.stage in ["RECONCILED", "PUBLISHED"]),
+            quarantined_batches=sum(1 for b in b_list if b.stage == "GATE_QUARANTINED"),
+            total_records_processed=sum(b.total_records for b in b_list),
+            sla_breaches=sum(1 for b in b_list if b.time_estimate and b.time_estimate.sla_status == "BREACHED"),
+            at_risk_count=sum(1 for b in b_list if b.time_estimate and b.time_estimate.sla_status == "AT_RISK"),
             batches=b_list
         )
 
-    def _seed_sample_batches(self):
-        """Pre-seeds realistic batches to demonstrate the pipeline out-of-the-box."""
-        # 1. Check if there are generated batch files in File-Gen Scripts/OutPut/ingestion_batches
-        sample_batch_file = settings.batches_dir / "ingest_batch_0001.csv"
-        if sample_batch_file.exists():
-            try:
-                self.ingest_batch(
-                    file_path=sample_batch_file,
-                    filename="bank_stmt_eod_0001.csv",
-                    source="SFTP",
-                    auto_run_pipeline=True
-                )
-            except Exception as e:
-                logger.warning(f"Could not seed batch 0001: {e}")
-
-        sample_batch_file_2 = settings.batches_dir / "ingest_batch_0002.csv"
-        if sample_batch_file_2.exists():
-            try:
-                self.ingest_batch(
-                    file_path=sample_batch_file_2,
-                    filename="bank_stmt_eod_0002.csv",
-                    source="SFTP",
-                    auto_run_pipeline=True
-                )
-            except Exception as e:
-                logger.warning(f"Could not seed batch 0002: {e}")
+    @staticmethod
+    def _now() -> str:
+        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 pipeline_orchestrator = PipelineOrchestrator()
-

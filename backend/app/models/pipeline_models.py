@@ -70,6 +70,24 @@ class TimeEstimate(BaseModel):
     actual_duration_seconds: Optional[float] = None
 
 
+class AgentExecution(BaseModel):
+    """One dispatch of a batch artefact to an external (Aava/CrewAI) agent."""
+    stage: str                      # STAGE_4_ANOMALY, STAGE_6_RECON, STAGE_7_SLA
+    agent_id: str
+    agent_name: str
+    trigger: str = "AUTOMATIC"      # AUTOMATIC | MANUAL
+    success: bool = False
+    job_id: Optional[int] = None
+    agent_execution_id: Optional[str] = None
+    status: str = "PENDING"         # PENDING, SUBMITTED, IN_PROGRESS, SUCCESS, FAILED, SKIPPED
+    message: Optional[str] = None
+    http_status: Optional[str] = None
+    target_file: Optional[str] = None
+    submitted_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    output: Optional[Any] = None
+
+
 class GLMatchSummary(BaseModel):
     total_eligible_rows: int
     matched_count: int
@@ -78,6 +96,7 @@ class GLMatchSummary(BaseModel):
     tier_3_ref: int
     tier_4_amount: int
     unmatched_reconciling_items: int
+    outstanding_gl_items: int = 0
     ambiguous_count: int
     match_rate_pct: float
 
@@ -116,6 +135,17 @@ class BatchRecord(BaseModel):
     publish_event: Optional[PublishEvent] = None
     batch_file_path: Optional[str] = None
     anomaly_file_path: Optional[str] = None
+
+    # Stage 6 / Stage 7 artefacts written to disk (agent inputs + audit exports)
+    matched_file_path: Optional[str] = None
+    unmatched_file_path: Optional[str] = None
+    outstanding_file_path: Optional[str] = None
+    ambiguous_file_path: Optional[str] = None
+    sla_metrics_file_path: Optional[str] = None
+
+    # Automatic multi-agent dispatch log, keyed by pipeline stage
+    agent_executions: Dict[str, AgentExecution] = Field(default_factory=dict)
+    # Most recent dispatch (kept for backwards compatibility with older clients)
     agent_execution: Optional[Dict[str, Any]] = None
 
 
