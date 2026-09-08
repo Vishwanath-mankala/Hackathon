@@ -47,6 +47,22 @@ interface Hypothesis {
   recommendedInvestigation?: string;
 }
 
+/** A run of inline text; bold and code are rendered as spans, never as HTML. */
+interface InlineSeg {
+  text: string;
+  bold?: boolean;
+  code?: boolean;
+}
+
+/** One block of a prose (non-JSON) report. */
+type ProseBlock =
+  | { kind: 'heading'; level: number; segs: InlineSeg[] }
+  | { kind: 'paragraph'; segs: InlineSeg[] }
+  | { kind: 'labelled'; label: string; segs: InlineSeg[] }
+  | { kind: 'bullets'; items: InlineSeg[][] }
+  | { kind: 'numbered'; items: InlineSeg[][] }
+  | { kind: 'rule' };
+
 /** Top-level keys this component lays out explicitly; anything else falls through. */
 const KNOWN_KEYS = new Set([
   'batch_metadata',
@@ -85,7 +101,9 @@ const KNOWN_KEYS = new Set([
 
         <div class="flex items-center gap-3 text-[11px] font-mono text-text-secondary">
           @if (!parsed()) {
-            <span class="text-status-amber">Unstructured output — showing as text</span>
+            <span class="text-text-secondary" title="The agent returned prose rather than the JSON contract in AGENTS.md; formatted from its text.">
+              Prose report
+            </span>
           }
           <button (click)="copyRaw()" class="text-accent-action hover:underline">
             {{ copied() ? 'Copied' : 'Copy raw' }}
@@ -93,8 +111,70 @@ const KNOWN_KEYS = new Set([
         </div>
       </div>
 
-      @if (view() === 'raw' || !parsed()) {
+      @if (view() === 'raw') {
         <pre class="whitespace-pre-wrap text-[11px] text-text-primary font-mono leading-relaxed p-3 max-h-[32rem] overflow-y-auto select-text">{{ rawText() }}</pre>
+      } @else if (!parsed()) {
+        <!-- ===== Prose report (markdown-lite / "Label: value" lines) ===== -->
+        <div class="p-3 space-y-2.5 max-h-[32rem] overflow-y-auto text-[12px] select-text">
+          @for (block of prose(); track $index) {
+            @switch (block.kind) {
+              @case ('heading') {
+                <h4 class="font-semibold text-text-primary pt-1"
+                    [ngClass]="block.level <= 2 ? 'text-[13px] border-b border-border-default pb-1' : 'text-[12px] font-mono uppercase tracking-wider text-text-secondary'">
+                  <ng-container *ngTemplateOutlet="inlineTpl; context: { segs: block.segs }" />
+                </h4>
+              }
+              @case ('labelled') {
+                <div class="pl-2.5 border-l-2 border-border-default">
+                  <span class="text-[10px] font-mono font-semibold text-text-secondary uppercase tracking-wider block">{{ block.label }}</span>
+                  @if (block.segs.length) {
+                    <p class="text-text-primary leading-relaxed">
+                      <ng-container *ngTemplateOutlet="inlineTpl; context: { segs: block.segs }" />
+                    </p>
+                  } @else {
+                    <p class="text-text-secondary">—</p>
+                  }
+                </div>
+              }
+              @case ('bullets') {
+                <ul class="list-disc pl-5 space-y-1 text-text-primary leading-relaxed">
+                  @for (item of block.items; track $index) {
+                    <li><ng-container *ngTemplateOutlet="inlineTpl; context: { segs: item }" /></li>
+                  }
+                </ul>
+              }
+              @case ('numbered') {
+                <ol class="list-decimal pl-5 space-y-1 text-text-primary leading-relaxed">
+                  @for (item of block.items; track $index) {
+                    <li><ng-container *ngTemplateOutlet="inlineTpl; context: { segs: item }" /></li>
+                  }
+                </ol>
+              }
+              @case ('rule') {
+                <hr class="border-border-default" />
+              }
+              @default {
+                <p class="text-text-primary leading-relaxed">
+                  <ng-container *ngTemplateOutlet="inlineTpl; context: { segs: block.segs }" />
+                </p>
+              }
+            }
+          }
+        </div>
+
+        <!-- Inline runs: bold and code become styled spans. Agent text is untrusted,
+             so it is never injected as HTML — every character is interpolated. -->
+        <ng-template #inlineTpl let-segs="segs">
+          @for (seg of segs; track $index) {
+            @if (seg.code) {
+              <code class="font-mono text-[11px] px-1 bg-surface-sunken border border-border-default">{{ seg.text }}</code>
+            } @else if (seg.bold) {
+              <strong class="font-semibold">{{ seg.text }}</strong>
+            } @else {
+              <span>{{ seg.text }}</span>
+            }
+          }
+        </ng-template>
       } @else {
         <div class="p-3 space-y-3 max-h-[32rem] overflow-y-auto">
 
@@ -497,6 +577,102 @@ export class AgentReportComponent {
       .filter(i => i.text !== undefined && i.text !== null && String(i.text).trim())
       .map(i => ({ label: i.label, text: String(i.text) }));
   });
+
+  /** Non-JSON output broken into readable blocks. Empty when the output is JSON. */
+  prose = computed<ProseBlock[]>(() => {
+    if (this.parsed()) return [];
+    const text = this.rawText();
+    if (!text.trim()) return [];
+
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    const blocks: ProseBlock[] = [];
+    let para: string[] = [];
+    let list: { kind: 'bullets' | 'numbered'; items: InlineSeg[][] } | null = null;
+
+    const flushPara = () => {
+      if (para.length) {
+        blocks.push({ kind: 'paragraph', segs: this.inline(para.join(' ')) });
+        para = [];
+      }
+    };
+    const flushList = () => {
+      if (list) {
+        blocks.push(list);
+        list = null;
+      }
+    };
+
+    for (const raw of lines) {
+      const trimmed = raw.trim();
+
+      if (!trimmed) { flushPara(); flushList(); continue; }
+
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+        flushPara(); flushList();
+        blocks.push({ kind: 'rule' });
+        continue;
+      }
+
+      const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        flushPara(); flushList();
+        blocks.push({ kind: 'heading', level: heading[1].length, segs: this.inline(heading[2]) });
+        continue;
+      }
+
+      // A line that is nothing but **Bold** (optionally ending in ':') is a
+      // heading in practice — LLM markdown uses it constantly.
+      const boldOnly = trimmed.match(/^\*\*([^*]{1,80}?)\*\*:?$/);
+      if (boldOnly) {
+        flushPara(); flushList();
+        blocks.push({ kind: 'heading', level: 3, segs: [{ text: boldOnly[1].replace(/:$/, '') }] });
+        continue;
+      }
+
+      const bullet = trimmed.match(/^[-*\u2022]\s+(.+)$/);
+      const numbered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+      if (bullet || numbered) {
+        flushPara();
+        const kind = bullet ? 'bullets' : 'numbered';
+        if (!list || list.kind !== kind) { flushList(); list = { kind, items: [] }; }
+        list.items.push(this.inline((bullet ?? numbered)![1]));
+        continue;
+      }
+
+      // "Label: value" at the start of a line. A label is a short title — at
+      // most five words — so a sentence that happens to contain a colon
+      // ("The tier is driven by one metric: …") stays a paragraph.
+      const labelled = trimmed.match(/^([A-Z][A-Za-z0-9 \/&()'-]{1,48}?):\s*(.*)$/);
+      if (labelled && !para.length && labelled[1].trim().split(/\s+/).length <= 5) {
+        flushList();
+        blocks.push({ kind: 'labelled', label: labelled[1], segs: this.inline(labelled[2]) });
+        continue;
+      }
+
+      flushList();
+      para.push(trimmed);
+    }
+    flushPara();
+    flushList();
+    return blocks;
+  });
+
+  /** Splits a line into text / **bold** / `code` runs without touching HTML. */
+  inline(text: string): InlineSeg[] {
+    const segs: InlineSeg[] = [];
+    const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+    let last = 0;
+    for (const m of text.matchAll(re)) {
+      const i = m.index ?? 0;
+      if (i > last) segs.push({ text: text.slice(last, i) });
+      const tok = m[0];
+      if (tok.startsWith('`')) segs.push({ text: tok.slice(1, -1), code: true });
+      else segs.push({ text: tok.slice(2, -2), bold: true });
+      last = i + tok.length;
+    }
+    if (last < text.length) segs.push({ text: text.slice(last) });
+    return segs.filter(seg => seg.text.length);
+  }
 
   /** Top-level keys with no tailored layout — shown rather than silently dropped. */
   unknownSections = computed(() => {

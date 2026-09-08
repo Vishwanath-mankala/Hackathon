@@ -513,9 +513,13 @@ class PipelineOrchestrator:
         if not matches_df.empty and "matchRule" in matches_df.columns:
             tier_counts = {str(k): int(v) for k, v in matches_df["matchRule"].value_counts().items()}
 
-        matched_records = matches_df.to_dict(orient="records") if not matches_df.empty else []
-        unmatched_records = unmatched_df.to_dict(orient="records") if not unmatched_df.empty else []
-        ambiguous_records = ambiguous_df.to_dict(orient="records") if not ambiguous_df.empty else []
+        # These records are served straight out of /recon as JSON. The ingested
+        # frame is read with pandas defaults, so an empty cell is a float NaN —
+        # which json.dumps refuses. Nullify at this boundary so an empty
+        # reference or narrative never turns the read model into a 500.
+        matched_records = self._json_safe_records(matches_df)
+        unmatched_records = self._json_safe_records(unmatched_df)
+        ambiguous_records = self._json_safe_records(ambiguous_df)
 
         self.batch_match_results[batch_id] = {
             "matched": matched_records,
@@ -864,6 +868,13 @@ class PipelineOrchestrator:
             at_risk_count=sum(1 for b in b_list if b.time_estimate and b.time_estimate.sla_status == "AT_RISK"),
             batches=b_list
         )
+
+    @staticmethod
+    def _json_safe_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """to_dict(records) with every NaN/NaT replaced by None."""
+        if df is None or df.empty:
+            return []
+        return df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
     @staticmethod
     def _now() -> str:

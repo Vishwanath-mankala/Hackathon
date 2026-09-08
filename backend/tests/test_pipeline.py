@@ -424,3 +424,35 @@ def test_escalated_anomalies_offer_no_fabricated_fix():
     )
     assert resolved["status"] == "HUMAN_RESOLVED"
     assert "override applied" in (resolved["remediation_notes"] or "").lower()
+
+
+def test_recon_read_model_survives_empty_cells():
+    """
+    An empty reference/narrative cell is a float NaN once pandas has read the
+    statement. The /recon read model serves those rows as JSON, and json.dumps
+    rejects NaN — this used to be a 500 on any batch with a blank cell.
+    """
+    csv_content = (
+        "external_txn_id,account,currency,amount,debit_credit,booking_date,value_date,reference,narrative\n"
+        # Blank reference AND narrative on a row that will not match the GL.
+        "TXN-501,ACC#00001,USD,123456.78,DR,2023-07-01,2023-07-01,,\n"
+        "TXN-502,ACC#00001,USD,987654.32,CR,2023-07-02,2023-07-02,REF-502,\n"
+    )
+    files = {"file": ("blank_cells.csv", csv_content.encode("utf-8"), "text/csv")}
+    res = client.post("/api/pipeline/ingest", files=files)
+    assert res.status_code == 200
+    batch_id = res.json()["batch_id"]
+    assert res.json()["stage"] in ("RECONCILED", "PUBLISHED"), "clean batch should reach Stage 6"
+
+    recon = client.get(f"/api/pipeline/batches/{batch_id}/recon")
+    assert recon.status_code == 200, recon.text
+    body = recon.json()
+
+    # The blank cells come back as JSON null, never as NaN or the string "nan".
+    rows = body["unmatched_sample"] + body["matched_sample"]
+    assert rows, "expected at least one row in the read model"
+    for row in rows:
+        for key in ("reference", "narrative", "ingest_reference"):
+            if key in row:
+                assert row[key] is None or isinstance(row[key], str)
+                assert row[key] != "nan"

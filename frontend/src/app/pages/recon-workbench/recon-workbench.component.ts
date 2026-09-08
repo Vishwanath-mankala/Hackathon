@@ -1,4 +1,14 @@
-import { Component, ChangeDetectionStrategy, inject, OnInit, signal } from '@angular/core';
+import {
+  Component,
+  ChangeDetectionStrategy,
+  DestroyRef,
+  ElementRef,
+  effect,
+  inject,
+  OnInit,
+  signal,
+  viewChild
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PipelineService, describeHttpError } from '../../core/services/pipeline.service';
@@ -504,21 +514,32 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
           </div>
         }
       </div>
+    </div>
 
-      <!-- ===================================================================
-           Analyst sign-off dialog. Records an append-only audit decision;
-           revising a call supersedes it rather than overwriting it.
-           =================================================================== -->
-      @if (signoffRow(); as row) {
+    <!-- =====================================================================
+         Analyst sign-off dialog. Rendered as a sibling of the page wrapper, not
+         inside it: the wrapper's entry animation applies a transform, and a
+         transformed ancestor becomes the containing block for position:fixed,
+         which would pin the overlay to the page instead of the viewport.
+         Records an append-only audit decision; revising supersedes, never
+         overwrites.
+         ===================================================================== -->
+    @if (signoffRow(); as row) {
         <div
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="signoff-title"
           (click)="closeSignoffDialog()"
+          (keydown.escape)="closeSignoffDialog()"
         >
-          <div class="w-full max-w-[560px] bg-surface border border-border-strong shadow-lg" (click)="$event.stopPropagation()">
-            <div class="flex items-start justify-between p-4 border-b border-border-default">
+          <div
+            #signoffPanel
+            tabindex="-1"
+            class="w-full max-w-[560px] max-h-[90vh] flex flex-col bg-surface border border-border-strong shadow-lg outline-none"
+            (click)="$event.stopPropagation()"
+          >
+            <div class="flex items-start justify-between p-4 border-b border-border-default shrink-0">
               <div class="min-w-0">
                 <h2 id="signoff-title" class="text-[15px] font-medium text-text-primary">Analyst sign-off</h2>
                 <p class="text-[12px] font-mono text-text-secondary truncate">
@@ -533,7 +554,7 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
               </button>
             </div>
 
-            <div class="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+            <div class="p-4 space-y-4 flex-1 min-h-0 overflow-y-auto">
               @if (existingSignoff(); as prev) {
                 <div class="p-2.5 bg-surface-sunken border border-border-default text-[11px] font-mono space-y-0.5">
                   <span class="text-text-secondary">Currently standing:</span>
@@ -634,7 +655,7 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
               }
             </div>
 
-            <div class="flex items-center justify-between gap-2 p-4 border-t border-border-default bg-surface-sunken">
+            <div class="flex items-center justify-between gap-2 p-4 border-t border-border-default bg-surface-sunken shrink-0">
               <span class="text-[11px] font-mono text-text-secondary">
                 Recorded to the batch's append-only audit trail.
               </span>
@@ -663,7 +684,6 @@ const ARTIFACT_FOR_DATASET: Record<ReconDataset, ArtifactKind> = {
           </div>
         </div>
       }
-    </div>
   `,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -671,6 +691,24 @@ export class ReconWorkbenchComponent implements OnInit {
   pipeline = inject(PipelineService);
   private reconService = inject(ReconciliationService);
   private toast = inject(ToastService);
+
+  private signoffPanel = viewChild<ElementRef<HTMLElement>>('signoffPanel');
+
+  constructor() {
+    // While the dialog is open the overlay is fixed, so any page scroll would
+    // only move content the user cannot reach. Lock it, and put keyboard focus
+    // inside the panel so Escape and Tab land where they should.
+    effect(() => {
+      const open = !!this.signoffRow();
+      document.body.style.overflow = open ? 'hidden' : '';
+      if (open) {
+        queueMicrotask(() => this.signoffPanel()?.nativeElement.focus());
+      }
+    });
+    inject(DestroyRef).onDestroy(() => {
+      document.body.style.overflow = '';
+    });
+  }
 
   batches = this.pipeline.batches;
   selectedBatchId = this.pipeline.selectedBatchId;

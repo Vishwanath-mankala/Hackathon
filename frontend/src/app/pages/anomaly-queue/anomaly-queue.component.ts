@@ -316,7 +316,7 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                       No correction can be derived from this row — supply the value from the source statement, or quarantine.
                     </div>
 
-                    @if (item.override_fields?.length) {
+                    @if (item.override_fields.length) {
                       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         @for (field of item.override_fields; track field) {
                           <div class="space-y-1">
@@ -338,7 +338,7 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                     }
 
                     <div class="flex flex-wrap items-center justify-end gap-2">
-                      @if (item.override_fields?.length) {
+                      @if (item.override_fields.length) {
                         <button
                           (click)="applyOverride(item)"
                           [disabled]="resolvingId() === item.id || !canOverride(item)"

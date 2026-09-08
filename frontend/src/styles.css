@@ -153,8 +153,12 @@ th, td {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* fill-mode `backwards`, not `both`: `both` would keep the final keyframe's
+   transform applied after the animation, and a transformed element becomes the
+   containing block for position:fixed descendants — a modal inside the page
+   wrapper would then pin to the page and scroll away instead of the viewport. */
 .animate-fade-in {
-  animation: fade-in 180ms ease-out both;
+  animation: fade-in 180ms ease-out backwards;
 }
 
 @keyframes skeleton-shimmer {
