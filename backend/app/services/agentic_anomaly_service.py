@@ -397,10 +397,15 @@ class AgenticAnomalyService:
                         category="STRUCTURAL",
                         description=f"Transaction ID '{s_id}' appears multiple times within the batch.",
                         auto_remediable=False,
-                        suggested_fix={"action": "QUARANTINE_DUPLICATE", "external_txn_id": f"{s_id}_DUP"},
+                        suggested_fix=None,
+                        override_fields=["external_txn_id"],
                         status="ESCALATED",
                         confidence_score=0.98,
-                        remediation_notes="Requires human confirmation to distinguish intentional retry vs duplicate bank transmission."
+                        remediation_notes=(
+                            "Two lines share this transaction ID. Only the source statement says whether "
+                            "this is a duplicate transmission or a distinct transaction the bank mis-keyed. "
+                            "Supply the correct external_txn_id, or quarantine the row."
+                        )
                     ))
                 else:
                     seen_txn_ids.add(s_id)
@@ -437,10 +442,15 @@ class AgenticAnomalyService:
                         category="SEMANTIC",
                         description="Transaction line declared with zero value ($0.00).",
                         auto_remediable=False,
-                        suggested_fix={"action": "INSPECT_ORIGINAL_LINE"},
+                        suggested_fix=None,
+                        override_fields=["amount"],
                         status="ESCALATED",
                         confidence_score=0.90,
-                        remediation_notes="Zero amount lines violate ledger settlement guidelines."
+                        remediation_notes=(
+                            "Line declared with zero value, which carries no economic substance. "
+                            "Read the true amount off the source statement and supply it, or quarantine "
+                            "the row if the line is a memo entry."
+                        )
                     ))
             except Exception:
                 anomalies.append(AnomalyItem(
@@ -455,9 +465,14 @@ class AgenticAnomalyService:
                     category="STRUCTURAL",
                     description=f"Amount value '{amount_str}' cannot be parsed as numeric float.",
                     auto_remediable=False,
-                    suggested_fix={"action": "CORRECT_AMOUNT", "amount": 0.0},
+                    suggested_fix=None,
+                    override_fields=["amount"],
                     status="ESCALATED",
-                    confidence_score=0.95
+                    confidence_score=0.95,
+                    remediation_notes=(
+                        "The amount could not be parsed, so its true value is unknown. "
+                        "Supply the amount from the source statement, or quarantine the row."
+                    )
                 ))
 
             # Check: Debit/Credit flag (SEMANTIC)
@@ -501,9 +516,15 @@ class AgenticAnomalyService:
                         category="SEMANTIC",
                         description=f"Unrecognized DR/CR direction '{dc}'.",
                         auto_remediable=False,
-                        suggested_fix={"debit_credit": "DR"},
+                        suggested_fix=None,
+                        override_fields=["debit_credit"],
                         status="ESCALATED",
-                        confidence_score=0.80
+                        confidence_score=0.80,
+                        remediation_notes=(
+                            "Direction flag is unrecognised and cannot be mapped to DR or CR without "
+                            "guessing, which would invert the transaction's sign. Supply the direction "
+                            "from the source statement, or quarantine the row."
+                        )
                     ))
 
             # Check: Currency code (SEMANTIC)
@@ -542,9 +563,14 @@ class AgenticAnomalyService:
                         category="SEMANTIC",
                         description=f"Currency '{raw_curr}' is not a recognized ISO banking currency.",
                         auto_remediable=False,
-                        suggested_fix={"currency": "USD"},
+                        suggested_fix=None,
+                        override_fields=["currency"],
                         status="ESCALATED",
-                        confidence_score=0.85
+                        confidence_score=0.85,
+                        remediation_notes=(
+                            "Currency is not a recognised ISO-4217 code. Defaulting it would misstate the "
+                            "value of the transaction. Supply the correct 3-letter code, or quarantine the row."
+                        )
                     ))
 
             # Check: Referential Integrity against GL Chart of Accounts (REFERENTIAL)
@@ -582,10 +608,15 @@ class AgenticAnomalyService:
                         category="REFERENTIAL",
                         description=f"Account '{account}' not present in GL chart of accounts.",
                         auto_remediable=False,
-                        suggested_fix={"account": "ACC#00001"},
+                        suggested_fix=None,
+                        override_fields=["account"],
                         status="ESCALATED",
                         confidence_score=0.75,
-                        remediation_notes="Row needs manual GL account assignment before reconciliation."
+                        remediation_notes=(
+                            "Account is not in the GL chart of accounts. It may be newly opened, renamed, "
+                            "or mis-keyed upstream — nothing in the row says which. Assign the correct GL "
+                            "account, or quarantine the row."
+                        )
                     ))
 
             # Check: Date formatting (TIMING)

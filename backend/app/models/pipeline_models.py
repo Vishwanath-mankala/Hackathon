@@ -38,7 +38,12 @@ class AnomalyItem(BaseModel):
     category: str = "STRUCTURAL"  # STRUCTURAL, SEMANTIC, TIMING, REFERENTIAL (ARCHITECTURE.md Stage 4)
     description: str
     auto_remediable: bool = False
+    # Only set when a correction is derivable from the row itself and applying it
+    # is lossless. Escalated rows carry None: there is nothing safe to propose,
+    # and offering a guess an analyst could approve would corrupt the ledger.
     suggested_fix: Optional[Dict[str, Any]] = None
+    # Columns the analyst has to fill in to resolve this by OVERRIDE.
+    override_fields: List[str] = Field(default_factory=list)
     status: str = "DETECTED"  # DETECTED, AUTO_REMEDIATED, ESCALATED, HUMAN_RESOLVED, QUARANTINED
     remediation_notes: Optional[str] = None
     confidence_score: float = 0.85

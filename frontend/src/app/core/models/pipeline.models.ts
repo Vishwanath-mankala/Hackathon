@@ -37,7 +37,13 @@ export interface AnomalyItem {
   category: 'STRUCTURAL' | 'SEMANTIC' | 'TIMING' | 'REFERENTIAL' | string;
   description: string;
   auto_remediable: boolean;
+  /**
+   * Only present when a correction is derivable from the row itself and applying
+   * it is lossless. Escalated rows carry null — there is nothing safe to propose.
+   */
   suggested_fix?: Record<string, any> | null;
+  /** Columns the analyst must fill in to resolve this by OVERRIDE. */
+  override_fields: string[];
   status: 'DETECTED' | 'AUTO_REMEDIATED' | 'ESCALATED' | 'HUMAN_RESOLVED' | 'QUARANTINED';
   remediation_notes?: string | null;
   confidence_score: number;

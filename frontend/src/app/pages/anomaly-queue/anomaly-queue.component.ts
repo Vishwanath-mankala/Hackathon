@@ -14,6 +14,7 @@ import { ToastService } from '../../core/services/toast.service';
 import { AgentExecution, AnomalyItem } from '../../core/models/pipeline.models';
 import { AsyncStateComponent } from '../../shared/components/async-state/async-state.component';
 import { SpinnerComponent } from '../../shared/components/spinner/spinner.component';
+import { AgentReportComponent } from '../../shared/components/agent-report/agent-report.component';
 
 /** Execution states that mean the agent job is finished — polling stops here. */
 const TERMINAL_STATES = new Set(['SUCCESS', 'COMPLETED', 'FAILED', 'ERROR', 'CANCELLED', 'SKIPPED']);
@@ -23,7 +24,7 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
 @Component({
   selector: 'app-anomaly-queue',
   standalone: true,
-  imports: [CommonModule, FormsModule, AsyncStateComponent, SpinnerComponent],
+  imports: [CommonModule, FormsModule, AsyncStateComponent, SpinnerComponent, AgentReportComponent],
   template: `
     <div class="space-y-6 animate-fade-in">
       <!-- Section Header -->
@@ -193,7 +194,7 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                 </div>
 
                 @if (expandedStage() === exec.stage && exec.output) {
-                  <pre class="whitespace-pre-wrap text-[11px] text-text-primary font-mono leading-relaxed bg-surface p-3 border-t border-border-default max-h-96 overflow-y-auto select-text">{{ formatOutput(exec.output) }}</pre>
+                  <app-agent-report [output]="exec.output" />
                 }
               </div>
             }
@@ -279,17 +280,14 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                   <span class="ml-1.5">{{ item.description }}</span>
                 </div>
 
-                <div class="p-2.5 bg-surface border border-border-default text-[12px] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div class="font-mono text-[11px] text-text-secondary break-words">
-                    @if (item.suggested_fix) {
-                      Suggested fix: <code class="text-status-green font-semibold">{{ item.suggested_fix | json }}</code>
-                    } @else {
-                      No automated fix proposed — analyst judgement required.
-                    }
-                  </div>
+                <!-- A derived, lossless correction: the analyst can accept it as-is. -->
+                @if (item.suggested_fix) {
+                  <div class="p-2.5 bg-surface border border-border-default text-[12px] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div class="font-mono text-[11px] text-text-secondary break-words">
+                      Derived fix: <code class="text-status-green font-semibold">{{ item.suggested_fix | json }}</code>
+                    </div>
 
-                  <div class="flex items-center gap-2 shrink-0">
-                    @if (item.suggested_fix) {
+                    <div class="flex items-center gap-2 shrink-0">
                       <button
                         (click)="resolveItem(item.id, 'APPROVE')"
                         [disabled]="resolvingId() === item.id"
@@ -300,17 +298,70 @@ const STAGE_ORDER = ['STAGE_1_EXTRACTION', 'STAGE_4_ANOMALY', 'STAGE_6_RECON', '
                         }
                         <span>Approve fix</span>
                       </button>
+
+                      <button
+                        (click)="resolveItem(item.id, 'QUARANTINE')"
+                        [disabled]="resolvingId() === item.id"
+                        class="bg-surface hover:bg-surface-sunken text-status-red text-[11px] font-medium px-2.5 py-1 border border-border-default transition-colors disabled:opacity-50"
+                      >
+                        Quarantine row
+                      </button>
+                    </div>
+                  </div>
+                } @else {
+                  <!-- Nothing safe to propose. The analyst supplies the real value or
+                       quarantines the row; there is deliberately no Approve here. -->
+                  <div class="p-2.5 bg-surface border border-border-default text-[12px] space-y-2.5">
+                    <div class="text-[11px] font-mono text-status-amber">
+                      No correction can be derived from this row — supply the value from the source statement, or quarantine.
+                    </div>
+
+                    @if (item.override_fields?.length) {
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        @for (field of item.override_fields; track field) {
+                          <div class="space-y-1">
+                            <label class="text-[11px] font-mono text-text-secondary block">
+                              {{ field }}
+                              <span class="text-text-secondary">(was: {{ currentValueFor(item, field) }})</span>
+                            </label>
+                            <input
+                              type="text"
+                              [ngModel]="overrideValue(item.id, field)"
+                              (ngModelChange)="setOverrideValue(item.id, field, $event)"
+                              [disabled]="resolvingId() === item.id"
+                              [placeholder]="'Correct ' + field + ' from the statement'"
+                              class="w-full bg-surface-sunken border border-border-default text-text-primary font-mono text-[12px] px-2.5 py-1.5 focus:border-border-strong focus:outline-none disabled:opacity-50"
+                            />
+                          </div>
+                        }
+                      </div>
                     }
 
-                    <button
-                      (click)="resolveItem(item.id, 'QUARANTINE')"
-                      [disabled]="resolvingId() === item.id"
-                      class="bg-surface hover:bg-surface-sunken text-status-red text-[11px] font-medium px-2.5 py-1 border border-border-default transition-colors disabled:opacity-50"
-                    >
-                      Quarantine row
-                    </button>
+                    <div class="flex flex-wrap items-center justify-end gap-2">
+                      @if (item.override_fields?.length) {
+                        <button
+                          (click)="applyOverride(item)"
+                          [disabled]="resolvingId() === item.id || !canOverride(item)"
+                          class="bg-accent-action hover:bg-accent-action-hover text-white text-[11px] font-medium px-2.5 py-1 border border-border-default transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
+                          [title]="canOverride(item) ? 'Write these values to the row' : 'Fill in every field to apply an override'"
+                        >
+                          @if (resolvingId() === item.id) {
+                            <app-spinner [size]="10" label="Applying override" />
+                          }
+                          <span>Apply correction</span>
+                        </button>
+                      }
+
+                      <button
+                        (click)="resolveItem(item.id, 'QUARANTINE')"
+                        [disabled]="resolvingId() === item.id"
+                        class="bg-surface hover:bg-surface-sunken text-status-red text-[11px] font-medium px-2.5 py-1 border border-border-default transition-colors disabled:opacity-50"
+                      >
+                        Quarantine row
+                      </button>
+                    </div>
                   </div>
-                </div>
+                }
               </div>
             }
           </div>
@@ -403,6 +454,9 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
   resolvingId = signal<string | null>(null);
   expandedStage = signal<string | null>(null);
 
+  /** Analyst-entered corrections, keyed "{anomalyId}::{field}". */
+  private overrides = signal<Record<string, string>>({});
+
   /** Agent dispatches for the active batch, ordered by pipeline stage. */
   executionList = computed<AgentExecution[]>(() =>
     Object.values(this.pipeline.agentExecutions()).sort(
@@ -494,11 +548,6 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
     this.expandedStage.update(v => (v === stage ? null : stage));
   }
 
-  formatOutput(output: any): string {
-    if (typeof output === 'string') return output;
-    return JSON.stringify(output, null, 2);
-  }
-
   artifactUrl(kind: 'statement' | 'anomaly_candidates'): string {
     const id = this.selectedBatchId();
     return id ? this.pipeline.getArtifactUrl(id, kind) : '#';
@@ -544,6 +593,81 @@ export class AnomalyQueueComponent implements OnInit, OnDestroy {
 
   quarantinedCount(): number {
     return this.anomalies().filter(a => a.status === 'QUARANTINED').length;
+  }
+
+  // -------------------------------------------------------------------------
+  // Manual correction for anomalies with no derivable fix
+  // -------------------------------------------------------------------------
+  private overrideKey(anomalyId: string, field: string): string {
+    return `${anomalyId}::${field}`;
+  }
+
+  overrideValue(anomalyId: string, field: string): string {
+    return this.overrides()[this.overrideKey(anomalyId, field)] ?? '';
+  }
+
+  setOverrideValue(anomalyId: string, field: string, value: string) {
+    this.overrides.update(map => ({ ...map, [this.overrideKey(anomalyId, field)]: value }));
+  }
+
+  /** The value already on the row, so the analyst can see what they are replacing. */
+  currentValueFor(item: AnomalyItem, field: string): string {
+    switch (field) {
+      case 'external_txn_id': return item.external_txn_id || '—';
+      case 'account': return item.account || '—';
+      case 'amount': return item.raw_amount ?? '—';
+      case 'booking_date': return item.booking_date || '—';
+      default: return '—';
+    }
+  }
+
+  /** Every named field has to be filled — a blank override is rejected server-side. */
+  canOverride(item: AnomalyItem): boolean {
+    const fields = item.override_fields ?? [];
+    if (!fields.length) return false;
+    return fields.every(f => this.overrideValue(item.id, f).trim().length > 0);
+  }
+
+  applyOverride(item: AnomalyItem) {
+    const batchId = this.selectedBatchId();
+    if (!batchId || !this.canOverride(item)) return;
+
+    const values: Record<string, string> = {};
+    for (const field of item.override_fields ?? []) {
+      values[field] = this.overrideValue(item.id, field).trim();
+    }
+
+    this.resolvingId.set(item.id);
+    this.pipeline.resolveEscalation(batchId, item.id, {
+      action: 'OVERRIDE',
+      override_values: values,
+    }).subscribe({
+      next: (b) => {
+        this.resolvingId.set(null);
+        this.clearOverrides(item);
+        this.toast.success(
+          'Correction applied',
+          b.escalated_count === 0
+            ? `Queue cleared — batch advanced to ${b.stage} and reconciled automatically.`
+            : `Row ${item.row_index} corrected. ${b.escalated_count} item(s) still pending.`
+        );
+        this.pipeline.loadAgentStatus(batchId).subscribe({ error: () => {} });
+      },
+      error: (err) => {
+        this.resolvingId.set(null);
+        this.toast.error('Correction rejected', describeHttpError(err));
+      }
+    });
+  }
+
+  private clearOverrides(item: AnomalyItem) {
+    this.overrides.update(map => {
+      const next = { ...map };
+      for (const field of item.override_fields ?? []) {
+        delete next[this.overrideKey(item.id, field)];
+      }
+      return next;
+    });
   }
 
   resolveItem(anomalyId: string, action: 'APPROVE' | 'QUARANTINE') {

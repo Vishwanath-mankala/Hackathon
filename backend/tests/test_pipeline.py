@@ -341,3 +341,86 @@ def test_analyst_signoff_audit_trail():
     csv_res = client.get(f"/api/pipeline/batches/{batch_id}/signoffs/file")
     assert csv_res.status_code == 200
     assert b"signoff_id" in csv_res.content
+
+
+def test_escalated_anomalies_offer_no_fabricated_fix():
+    """
+    An escalated anomaly has no correction derivable from the row, so it must not
+    carry a suggested_fix an analyst could approve — approving a guessed account,
+    currency, direction or amount would write a fabricated value into the ledger.
+    Resolution is OVERRIDE with a real value, or QUARANTINE.
+    """
+    csv_content = (
+        "external_txn_id,account,currency,amount,debit_credit,booking_date,value_date,reference,narrative\n"
+        # Unknown GL account + unrecognised currency + unmappable direction.
+        "TXN-301,ACC#99999,ZZZ,100.00,X,2023-06-01,2023-06-01,REF-301,unknown account\n"
+        # Auto-remediable: 'C' maps to CR losslessly, slash date normalises.
+        "TXN-302,ACC#00001,usd,250.00,C,02/06/2023,02/06/2023,REF-302,remediable\n"
+    )
+    files = {"file": ("no_fabricated_fix.csv", csv_content.encode("utf-8"), "text/csv")}
+    res = client.post("/api/pipeline/ingest", files=files)
+    assert res.status_code == 200
+    batch_id = res.json()["batch_id"]
+
+    anomalies = client.get(f"/api/pipeline/batches/{batch_id}/anomalies").json()
+    escalated = [a for a in anomalies if a["status"] == "ESCALATED"]
+    remediated = [a for a in anomalies if a["status"] == "AUTO_REMEDIATED"]
+    assert escalated, "expected escalations from the unknown account/currency/direction row"
+
+    # No escalated item proposes a value, and each names what the analyst must supply.
+    for a in escalated:
+        assert a["suggested_fix"] is None, f"{a['error_type']} still proposes {a['suggested_fix']}"
+        assert a["override_fields"], f"{a['error_type']} does not say which field to correct"
+        assert a["remediation_notes"], f"{a['error_type']} gives the analyst no guidance"
+
+    # Auto-remediated fixes are derived from the row, so they keep their value.
+    for a in remediated:
+        assert a["suggested_fix"], f"{a['error_type']} lost its derived fix"
+
+    target = escalated[0]
+    field = target["override_fields"][0]
+
+    # Approving a non-existent correction is refused rather than silently no-op'd.
+    approve = client.post(
+        f"/api/pipeline/batches/{batch_id}/anomalies/{target['id']}/resolve",
+        json={"action": "APPROVE"},
+    )
+    assert approve.status_code == 400
+    assert "nothing to approve" in approve.json()["detail"].lower()
+
+    # An empty or blank override is refused too.
+    assert client.post(
+        f"/api/pipeline/batches/{batch_id}/anomalies/{target['id']}/resolve",
+        json={"action": "OVERRIDE"},
+    ).status_code == 400
+
+    blank = client.post(
+        f"/api/pipeline/batches/{batch_id}/anomalies/{target['id']}/resolve",
+        json={"action": "OVERRIDE", "override_values": {field: "   "}},
+    )
+    assert blank.status_code == 400
+    assert "blank" in blank.json()["detail"].lower()
+
+    # Overriding a column that does not exist is refused.
+    assert client.post(
+        f"/api/pipeline/batches/{batch_id}/anomalies/{target['id']}/resolve",
+        json={"action": "OVERRIDE", "override_values": {"not_a_column": "x"}},
+    ).status_code == 400
+
+    # A real value supplied by the analyst is accepted and recorded.
+    good = client.post(
+        f"/api/pipeline/batches/{batch_id}/anomalies/{target['id']}/resolve",
+        json={
+            "action": "OVERRIDE",
+            "override_values": {field: "ACC#00007" if field == "account" else "USD"},
+            "analyst_notes": "read from the source statement",
+        },
+    )
+    assert good.status_code == 200
+
+    resolved = next(
+        a for a in client.get(f"/api/pipeline/batches/{batch_id}/anomalies").json()
+        if a["id"] == target["id"]
+    )
+    assert resolved["status"] == "HUMAN_RESOLVED"
+    assert "override applied" in (resolved["remediation_notes"] or "").lower()

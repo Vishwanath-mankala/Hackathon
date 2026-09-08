@@ -621,22 +621,60 @@ class PipelineOrchestrator:
         r_idx = target.row_index
 
         if action == "APPROVE":
-            if target.suggested_fix:
-                for k, v in target.suggested_fix.items():
-                    if k in df.columns:
-                        df.at[r_idx, k] = v
+            # Only anomalies with a correction derivable from the row itself carry a
+            # suggested_fix. Approving anything else would write a fabricated value
+            # into the ledger under an analyst's name.
+            if not target.suggested_fix:
+                raise ValueError(
+                    f"Anomaly {anomaly_id} ({target.error_type}) has no correction that can be derived "
+                    f"from the row, so there is nothing to approve. Supply the correct value with "
+                    f"OVERRIDE (fields: {target.override_fields or 'see remediation notes'}), "
+                    f"or QUARANTINE the row."
+                )
+
+            applied = {k: v for k, v in target.suggested_fix.items() if k in df.columns}
+            if not applied:
+                raise ValueError(
+                    f"Anomaly {anomaly_id} suggests {target.suggested_fix}, but none of those fields "
+                    f"exist in this batch. Use OVERRIDE or QUARANTINE."
+                )
+            for k, v in applied.items():
+                df.at[r_idx, k] = v
             target.status = "HUMAN_RESOLVED"
-            target.remediation_notes = f"Approved suggested fix. Notes: {analyst_notes or 'None'}"
-        elif action == "OVERRIDE" and override_values:
+            target.remediation_notes = f"Approved derived fix {applied}. Notes: {analyst_notes or 'None'}"
+
+        elif action == "OVERRIDE":
+            if not override_values:
+                raise ValueError(
+                    f"OVERRIDE requires override_values. Expected field(s): "
+                    f"{target.override_fields or 'see remediation notes'}."
+                )
+
+            unknown = [k for k in override_values if k not in df.columns]
+            if unknown:
+                raise ValueError(
+                    f"Cannot override {unknown}: not a column in this batch. "
+                    f"Columns available: {sorted(df.columns)}"
+                )
+
+            blank = [k for k, v in override_values.items() if v is None or str(v).strip() == ""]
+            if blank:
+                raise ValueError(f"Override values for {blank} are blank. Supply a value or quarantine the row.")
+
             for k, v in override_values.items():
-                if k in df.columns:
-                    df.at[r_idx, k] = v
+                df.at[r_idx, k] = v
             target.status = "HUMAN_RESOLVED"
             target.remediation_notes = f"Analyst manual override applied: {override_values}. Notes: {analyst_notes or 'None'}"
+
         elif action == "QUARANTINE":
             target.status = "QUARANTINED"
             target.remediation_notes = f"Row quarantined by analyst. Notes: {analyst_notes or 'None'}"
             batch.quarantined_rows_count += 1
+
+        else:
+            raise ValueError(
+                f"Unknown action '{action}'. Expected APPROVE, OVERRIDE or QUARANTINE."
+            )
 
         remaining_escalated = [a for a in anomalies if a.status == "ESCALATED"]
         batch.escalated_count = len(remaining_escalated)

@@ -208,6 +208,8 @@ def resolve_human_escalation(
         return updated_batch
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Resolution error: {str(e)}")
 

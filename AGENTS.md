@@ -76,9 +76,14 @@ agent gate:
    malformed amounts, unknown GL accounts, invalid ISO currencies — hold the
    batch at `ESCALATED_FOR_REVIEW`. **Stage 6 does not run until every one is
    resolved**, so an approved correction is matched against the GL rather than
-   skipped. Resolve via `POST /batches/{id}/anomalies/{anomaly_id}/resolve` with
-   `APPROVE`, `OVERRIDE` or `QUARANTINE`. Clearing the last item automatically
-   runs Stages 6 → 8 with no further input.
+   skipped. Resolve via `POST /batches/{id}/anomalies/{anomaly_id}/resolve` with:
+   - `APPROVE` — accepts the derived `suggested_fix`. Rejected with `400` when the
+     anomaly has none, which is the case for every escalated row.
+   - `OVERRIDE` — writes the analyst's own values. Blank values, and columns not in
+     the batch, are rejected.
+   - `QUARANTINE` — isolates the row from matching.
+
+   Clearing the last item automatically runs Stages 6 → 8 with no further input.
 
 2. **Stage 6 — ambiguous tie sign-off.** The recon agent *runs* without a human,
    but its tie-breaks are advisory. An ambiguous tie is a case where several GL
@@ -131,11 +136,25 @@ Task / Expected-output text to paste into the CrewAI (Aava) agent builder.
 | `status` | enum | `AUTO_REMEDIATED` \| `ESCALATED` |
 | `confidence_score` | float | 0.00–1.00 |
 | `description` | string | Human-readable diagnosis |
-| `suggested_fix` | JSON string | e.g. `{"debit_credit": "DR"}` |
+| `suggested_fix` | JSON string | The derived correction, e.g. `{"debit_credit": "DR"}`. **Empty for every `ESCALATED` row** — see the note below |
+| `override_fields` | list | Columns an analyst must supply to resolve an `ESCALATED` row |
+
+> **`suggested_fix` is only ever a derived correction.** It is populated solely for
+> `AUTO_REMEDIATED` rows, where the value comes from the row itself and applying it
+> is lossless — mapping `C` to `CR`, upper-casing a currency, normalising a slash
+> date, matching an account after whitespace normalisation. An `ESCALATED` row
+> carries `null`, because nothing in the row determines the right answer. The
+> engine does not guess an account, a currency, a direction or an amount, so there
+> is never a fabricated value for an analyst to approve. Those rows are resolved by
+> `OVERRIDE` with a real value read off the source statement, or `QUARANTINE`.
 
 **Output**: Enterprise risk analytics assessment — anomaly alert table, KRI
 dashboard, scenario analysis, audit log, compliance certification. Returned as a
 JSON string in the `output` field of the execution-history response.
+
+> The agent's report is **displayed, not applied**. Nothing it returns is written
+> back onto the anomaly records: its severity overrides and recommendations inform
+> the analyst, they do not change what the queue offers or auto-resolve anything.
 
 #### Platform prompt
 
