@@ -1,4 +1,4 @@
-# Render Blueprint — backend API as a web service with a persistent disk.
+# Render Blueprint — backend API as a web service.
 #
 # Connect the repo in Render and pick "Blueprint"; every setting below is
 # applied. The secrets (CREWAI_API_KEY and the agent IDs) are marked
@@ -7,22 +7,33 @@
 # The frontend is a static Angular build and is deployed separately
 # (Vercel: see frontend/vercel.json; or add a Render static site pointing at
 # frontend/ with publish path dist/frontend/browser).
+#
+# FREE TIER: no persistent disk is available, so durable state (data/recon.db,
+# run history, batch artefacts) lives in the container filesystem and is lost
+# on every deploy or restart. The app still runs — it starts cold with the
+# feed queue at file 1 and the estimator on its default constants. The GL
+# cache and the 65-file demo feed are tracked in git, so they are always there.
+# To keep state, move to a paid plan and uncomment the "disk" block and the
+# /var/data paths below.
 services:
   - type: web
     name: recon-api
     runtime: python
     rootDir: backend
-    plan: free            # a persistent disk needs a paid instance; see disk below
+    plan: free
     buildCommand: pip install -r requirements.txt
     # One worker, no --reload: the batch registry, orchestrator and run history
-    # are an in-memory cache over the SQLite file on the disk.
+    # are an in-memory cache over the SQLite file.
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: recon-data
-      mountPath: /var/data
-      sizeGB: 1
+
+    # Paid plans only (starter and up):
+    # disk:
+    #   name: recon-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.4
@@ -31,26 +42,25 @@ services:
       - key: HOST
         value: 0.0.0.0
 
-      # Durable state on the mounted disk. Without these the data lives inside
-      # the container filesystem and is lost on every deploy or restart.
-      - key: DB_PATH
-        value: /var/data/recon.db
-      - key: WORKING_FRAMES_DIR
-        value: /var/data/working_frames
-      - key: FORECAST_DIR
-        value: /var/data/forecasts
-      - key: SLA_METRICS_DIR
-        value: /var/data/sla_metrics
-      - key: BATCH_RESULTS_DIR
-        value: /var/data/batch_results
-      - key: INGESTION_STORAGE_DIR
-        value: /var/data/ingestion_storage
-      - key: QUARANTINE_DIR
-        value: /var/data/quarantined_batches
-      - key: ANOMALIES_DIR
-        value: /var/data/anomalies
-      - key: SFTP_DIR
-        value: /var/data/incoming_sftp
+      # With a disk, point every data location at it (uncomment with the disk):
+      # - key: DB_PATH
+      #   value: /var/data/recon.db
+      # - key: WORKING_FRAMES_DIR
+      #   value: /var/data/working_frames
+      # - key: FORECAST_DIR
+      #   value: /var/data/forecasts
+      # - key: SLA_METRICS_DIR
+      #   value: /var/data/sla_metrics
+      # - key: BATCH_RESULTS_DIR
+      #   value: /var/data/batch_results
+      # - key: INGESTION_STORAGE_DIR
+      #   value: /var/data/ingestion_storage
+      # - key: QUARANTINE_DIR
+      #   value: /var/data/quarantined_batches
+      # - key: ANOMALIES_DIR
+      #   value: /var/data/anomalies
+      # - key: SFTP_DIR
+      #   value: /var/data/incoming_sftp
 
       # Agent platform (Aava / CrewAI). Leave an ID blank to have that stage
       # report SKIPPED; there are no defaults. See AGENTS.md for the prompts.
